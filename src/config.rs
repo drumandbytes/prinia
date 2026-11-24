@@ -34,6 +34,7 @@ pub const KEYS: &[(&str, Ty)] = &[
     ("fast_under", Ty::Num),
     ("deep_over", Ty::Num),
     ("history_scan", Ty::Num),
+    ("ask_turns", Ty::Num),
     ("excerpt_prompt", Ty::Num),
     ("excerpt_reply", Ty::Num),
     ("agent", Ty::Bool),

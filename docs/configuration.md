@@ -103,8 +103,9 @@ API keys are read from the environment and are never written to the history or t
 | `max_age` | none | Also drop turns older than this (`90d`, `52w`) |
 | `fast_under` | `0` (off) | Calls with fewer characters than this use the fast tier unless a tier or model is given |
 | `deep_over` | none | Calls with more characters than this use the deep tier unless a tier or model is given |
-| `history_scan` | `200` | Newest turns that `history ask` and `history agent` read |
-| `excerpt_prompt` / `excerpt_reply` | `200` / `400` | Characters of each prompt and answer sent for `history ask` and `history agent` |
+| `history_scan` | `200` | Newest turns that `history agent` reads |
+| `ask_turns` | `15` | Best-matching turns `history ask` sends to the model |
+| `excerpt_prompt` / `excerpt_reply` | `200` / `400` (`history ask`: `400` / `1000`) | Characters of each prompt and answer sent for `history ask` and `history agent` |
 | `check_retries` | `2` | Extra attempts when an answer fails `--json` or `--check` |
 | `keychain` | `false` | Keep the history key in the OS credential store instead of a file ([History](history.md#where-the-key-lives)) |
 | `prompt_pipe`, `prompt_interactive` | see below | The system prompts |
