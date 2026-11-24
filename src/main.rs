@@ -77,6 +77,10 @@ struct Cli {
     #[arg(short = 'y', long)]
     yes: bool,
 
+    /// Answer with one shell command and nothing else (what the shell widget uses)
+    #[arg(long, conflicts_with_all = ["agent", "do_it", "json", "check"])]
+    cmd: bool,
+
     /// Don't use agent mode, even if the `agent` setting is on
     #[arg(long, conflicts_with = "agent")]
     no_agent: bool,
@@ -130,6 +134,11 @@ enum Cmd {
         /// Template: {calls} {cache_hits} {hit_rate} {input_tokens} {output_tokens} {tokens}
         #[arg(long)]
         format: Option<String>,
+    },
+    /// Print the shell integration to load: `eval "$(prinia shell zsh)"`
+    Shell {
+        #[arg(value_parser = ["zsh"])]
+        shell: String,
     },
     /// Allow the `.priniarc` files here to set providers, `run` and `write`
     Trust,
@@ -206,6 +215,10 @@ fn run() -> Result<()> {
     let keychain = cfg.bool("keychain").unwrap_or(false);
     match &cli.command {
         Some(Cmd::Config) => show_config(&cfg),
+        Some(Cmd::Shell { .. }) => {
+            print!("{}", include_str!("../scripts/prinia.zsh"));
+            Ok(())
+        }
         Some(Cmd::Trust) => {
             let done = config::trust(&std::env::current_dir()?)?;
             if done.is_empty() {
@@ -277,7 +290,7 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     }
 
     // Raw output whenever either end is a pipe.
-    let piped = !stdin_tty || !stdout_tty;
+    let piped = !stdin_tty || !stdout_tty || cli.cmd;
     let validate = cli.json || cli.check.is_some();
     // The setting only applies at a terminal; pipelines stay plain filters.
     let agent = cli.agent
@@ -290,7 +303,9 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     } else {
         "interactive"
     };
-    let system = if piped {
+    let system = if cli.cmd {
+        cmd_prompt()
+    } else if piped {
         cfg.str("prompt_pipe").unwrap_or_else(|| PROMPT_PIPE.into())
     } else {
         cfg.str("prompt_interactive")
@@ -511,6 +526,30 @@ fn combine(instruction: &str, payload: &str) -> String {
         (false, true) => instruction.to_string(),
         _ => payload.to_string(),
     }
+}
+
+/// The system prompt for `--cmd`: names the shell and OS, and the modern tools actually installed.
+fn cmd_prompt() -> String {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let shell = shell
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("sh");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let tools: Vec<&str> = ["rg", "fd", "jq", "yq"]
+        .into_iter()
+        .filter(|t| std::env::split_paths(&path).any(|d| d.join(t).is_file()))
+        .collect();
+    format!(
+        "Turn the user's request into ONE shell command for {shell} on {}. Output only the command on a single line: no explanation, no markdown, no code fences. Combine steps with | or &&. Installed tools you may prefer when they fit: {}. If the request is not something a command can do, output a single line starting with # that says why.",
+        std::env::consts::OS,
+        if tools.is_empty() {
+            "none".into()
+        } else {
+            tools.join(", ")
+        }
+    )
 }
 
 fn strip_fence(s: &str) -> String {

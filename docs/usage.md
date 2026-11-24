@@ -59,6 +59,14 @@ The context comes from your own history, not from a provider's session, so it wo
 
 A call with context is cached separately from the same question without it.
 
+## From the shell prompt (zsh)
+
+```bash
+eval "$(prinia shell zsh)"     # add to ~/.zshrc
+```
+
+Type what you want in plain words and press ctrl-g (`PRINIA_WIDGET_KEY` changes the key). The line is replaced by one shell command, which you can edit; nothing runs until you press enter. The model is told your shell and OS and which of `rg`, `fd`, `jq` and `yq` are installed. `prinia --cmd "..."` does the same without the widget. Answers from small local models can be wrong, so read the command before running it.
+
 ## Checking the answer
 
 Models sometimes return something a script cannot use. Two flags make a call refuse bad answers:
