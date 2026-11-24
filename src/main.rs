@@ -14,6 +14,7 @@ mod config;
 mod context;
 mod curate;
 mod history;
+mod init;
 mod key;
 mod keychain;
 mod provider;
@@ -135,6 +136,8 @@ enum Cmd {
         #[arg(long)]
         format: Option<String>,
     },
+    /// Find a local model server, pick a model for this machine and write the config
+    Init,
     /// Print the shell integration to load: `eval "$(prinia shell zsh)"`
     Shell {
         #[arg(value_parser = ["zsh"])]
@@ -215,6 +218,7 @@ fn run() -> Result<()> {
     let keychain = cfg.bool("keychain").unwrap_or(false);
     match &cli.command {
         Some(Cmd::Config) => show_config(&cfg),
+        Some(Cmd::Init) => init::run(),
         Some(Cmd::Shell { .. }) => {
             print!("{}", include_str!("../scripts/prinia.zsh"));
             Ok(())

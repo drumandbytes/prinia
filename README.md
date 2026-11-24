@@ -39,19 +39,12 @@ prinia "hello"
 No account or API key needed. With [Ollama](https://ollama.com) running:
 
 ```bash
-ollama pull qwen2.5:14b       # ~9 GB; fits a 16 GB machine, fast on Apple silicon
-mkdir -p ~/.config/prinia && cat > ~/.config/prinia/config.toml <<'EOF'
-provider = "local"
-
-[providers.local]
-type = "openai"
-base_url = "http://localhost:11434/v1"
-model = "qwen2.5:14b"
-EOF
-prinia "how do I find the largest files in a directory?"
+prinia init
 ```
 
-Small models (3B and under) invent commands and ignore instructions; `qwen2.5:14b` is a good starting point, and `qwen2.5:32b` is better if you have the memory. Other local runners with an OpenAI-compatible endpoint (LM Studio, llama.cpp, vLLM) work the same way with a different `base_url`.
+It checks how much memory you have, suggests a model that fits (for example `qwen2.5:14b` on 16 GB or more, plus `qwen2.5:32b` for `-d` on 40 GB or more), offers to `ollama pull` it, and writes `~/.config/prinia/config.toml` (it never overwrites an existing one). To do it by hand, see [Configuration](docs/configuration.md#providers).
+
+Small models (3B and under) invent commands and ignore instructions. Other OpenAI-compatible runners (LM Studio, llama.cpp, vLLM) work with a different `base_url`.
 
 See [Install](docs/install.md) for other platforms and building from source, and [Configuration](docs/configuration.md) for local models and other providers.
 
