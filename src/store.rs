@@ -160,6 +160,8 @@ impl Store {
     pub fn open_at(path: &Path, keychain: bool) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        // parallel prinia processes (`--each`, shell prompts) share this file
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version > SCHEMA_VERSION {
             bail!("the history was written by a newer version of prinia (schema {version})");
@@ -198,21 +200,21 @@ impl Store {
              PRAGMA user_version = {SCHEMA_VERSION};"
         ))?;
 
-        let wrapped: Option<Vec<u8>> = conn
-            .query_row("SELECT value FROM meta WHERE key = 'data_key'", [], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        let data_key = match (wrapped, key::load(keychain)?) {
-            (Some(w), Some(master)) => unseal(&master, &w)
-                .context("the key does not match this history")?
-                .try_into()
-                .map_err(|_| anyhow!("corrupt data key"))?,
-            (Some(_), None) => bail!(
-                "the history exists but its key is missing; restore it with `prinia key import`"
-            ),
-            (None, master) => {
-                let master = match master {
+        let read_wrapped = || -> Result<Option<Vec<u8>>> {
+            Ok(conn
+                .query_row("SELECT value FROM meta WHERE key = 'data_key'", [], |r| {
+                    r.get(0)
+                })
+                .optional()?)
+        };
+        let mut wrapped = read_wrapped()?;
+        if wrapped.is_none() {
+            // First use. Take the write lock before creating any key, so two processes starting
+            // at once cannot each make their own master key and lock each other out.
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            wrapped = read_wrapped()?;
+            if wrapped.is_none() {
+                let master = match key::load(keychain)? {
                     Some(m) => m,
                     None => {
                         let m = key::random()?;
@@ -225,8 +227,20 @@ impl Store {
                     "INSERT INTO meta (key, value) VALUES ('data_key', ?1)",
                     params![seal(&master, &dk)?],
                 )?;
-                dk
+                conn.execute_batch("COMMIT")?;
+                return Ok(Store { conn, data_key: dk });
             }
+            conn.execute_batch("COMMIT")?;
+        }
+        let data_key = match (wrapped, key::load(keychain)?) {
+            (Some(w), Some(master)) => unseal(&master, &w)
+                .context("the key does not match this history")?
+                .try_into()
+                .map_err(|_| anyhow!("corrupt data key"))?,
+            (Some(_), None) => bail!(
+                "the history exists but its key is missing; restore it with `prinia key import`"
+            ),
+            (None, _) => bail!("the history has no data key"),
         };
         Ok(Store { conn, data_key })
     }

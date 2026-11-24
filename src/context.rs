@@ -3,6 +3,7 @@
 //! summaries of still older blocks of turns. Summaries are derived from the history, cached by the
 //! exact turns they cover, and dropped whenever anything is deleted.
 use crate::provider::{Provider, Request};
+use crate::retrieve::{keywords, rank};
 use crate::store::{Filter, Store, Turn};
 use anyhow::Result;
 
@@ -19,6 +20,9 @@ pub struct Params<'a> {
     pub budget: usize,
     /// How many turns beyond the verbatim ones are listed as one-line questions.
     pub older: usize,
+    /// The new question; older turns that match its words are included in full.
+    pub query: &'a str,
+    pub relevant: usize,
     /// Summarize older blocks with this provider and model (the call's own, so privacy rules hold).
     pub summary: Option<Summary<'a>>,
 }
@@ -111,7 +115,7 @@ pub fn build(store: &Store, p: &Params) -> Result<Vec<(String, String)>> {
         dir: Some(p.dir.to_string()),
         ..Filter::default()
     };
-    let limit = if p.summary.is_some() {
+    let limit = if p.summary.is_some() || (p.relevant > 0 && !p.query.is_empty()) {
         LIST_LIMIT
     } else {
         p.verbatim + p.older
@@ -139,6 +143,28 @@ pub fn build(store: &Store, p: &Params) -> Result<Vec<(String, String)>> {
     let rest = &turns[recent.len()..];
     let asked = &rest[..p.older.min(rest.len())];
     let beyond = &rest[asked.len()..];
+
+    // retrieval: older turns about what is being asked now, in full, within half the budget
+    let mut related = Vec::new();
+    let mut related_ids = Vec::new();
+    if p.relevant > 0 && !p.query.is_empty() {
+        let kws = keywords(&p.query.chars().take(500).collect::<String>());
+        let mut used = 0;
+        for t in rank(rest, &kws, p.relevant, 2) {
+            let pair = (
+                cut(&user_text(t), USER_CAP),
+                cut(t.content.response.trim_end(), REPLY_CAP),
+            );
+            let size = pair.0.chars().count() + pair.1.chars().count();
+            if used + size > p.budget / 2 {
+                continue;
+            }
+            used += size;
+            related_ids.push(t.id);
+            related.push(pair);
+        }
+        related.reverse(); // oldest first, like the rest of the context
+    }
 
     let mut out = Vec::new();
     // tier 3: summaries of complete older blocks, newest blocks first, at most `blocks` of them
@@ -171,13 +197,19 @@ pub fn build(store: &Store, p: &Params) -> Result<Vec<(String, String)>> {
             ));
         }
     }
-    if !asked.is_empty() {
-        let lines: Vec<String> = asked.iter().rev().map(question).collect();
+    let lines: Vec<String> = asked
+        .iter()
+        .rev()
+        .filter(|t| !related_ids.contains(&t.id))
+        .map(question)
+        .collect();
+    if !lines.is_empty() {
         out.push(note(
             "Earlier questions asked in this directory (oldest first), for background:",
             &lines.join("\n"),
         ));
     }
+    out.extend(related);
     out.extend(recent);
     Ok(out)
 }

@@ -3,6 +3,7 @@
 use crate::config::Config;
 use crate::history::{FilterArgs, confirm, oneline};
 use crate::provider::{Provider, Request, Tier};
+use crate::retrieve::{keywords, rank};
 use crate::store::{Store, Turn};
 use anyhow::{Result, bail};
 use std::io::Write;
@@ -63,63 +64,6 @@ fn scan(store: &Store, f: &FilterArgs, cfg: &Config) -> Result<Vec<Turn>> {
     Ok(turns)
 }
 
-const FILLER: &[&str] = &[
-    "the",
-    "and",
-    "was",
-    "were",
-    "what",
-    "which",
-    "who",
-    "how",
-    "why",
-    "when",
-    "where",
-    "did",
-    "does",
-    "for",
-    "with",
-    "about",
-    "that",
-    "this",
-    "these",
-    "those",
-    "have",
-    "had",
-    "has",
-    "from",
-    "into",
-    "you",
-    "your",
-    "our",
-    "can",
-    "could",
-    "would",
-    "should",
-    "last",
-    "ago",
-    "week",
-    "weeks",
-    "day",
-    "days",
-    "month",
-    "months",
-    "year",
-    "yesterday",
-    "today",
-    "recently",
-    "tell",
-    "show",
-    "find",
-    "ask",
-    "asked",
-    "remember",
-    "again",
-    "there",
-    "then",
-    "than",
-];
-
 /// Time words in a question as (newer than, older than) seconds. Generous on purpose: "last week"
 /// covers the past two weeks, and the keywords do the narrowing.
 fn parse_when(q: &str) -> (Option<i64>, Option<i64>) {
@@ -160,46 +104,6 @@ fn parse_when(q: &str) -> (Option<i64>, Option<i64>) {
     }
 }
 
-fn keywords(q: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for w in q
-        .to_lowercase()
-        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'))
-    {
-        if w.chars().count() >= 3 && !FILLER.contains(&w) && !out.iter().any(|o| o == w) {
-            out.push(w.to_string());
-        }
-    }
-    out
-}
-
-/// The `k` turns that match the keywords best (prompt counts most, then input, then answer),
-/// best first; newest first among equals. With no keyword hit, simply the newest `k`.
-fn rank<'a>(turns: &'a [Turn], kws: &[String], k: usize) -> Vec<&'a Turn> {
-    let score = |t: &Turn| -> usize {
-        let c = &t.content;
-        let (i, p, r) = (
-            c.instruction.to_lowercase(),
-            c.payload.to_lowercase(),
-            c.response.to_lowercase(),
-        );
-        kws.iter()
-            .map(|w| {
-                3 * i.contains(w.as_str()) as usize
-                    + 2 * p.contains(w.as_str()) as usize
-                    + r.contains(w.as_str()) as usize
-            })
-            .sum()
-    };
-    let mut scored: Vec<(usize, &Turn)> = turns.iter().map(|t| (score(t), t)).collect();
-    if scored.iter().all(|(s, _)| *s == 0) {
-        return turns.iter().take(k).collect();
-    }
-    scored.retain(|(s, _)| *s > 0);
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.id.cmp(&a.1.id)));
-    scored.into_iter().take(k).map(|(_, t)| t).collect()
-}
-
 /// Answer a question about the history, using the fast tier: find the matching turns across the
 /// whole history (time words and keywords from the question, or `--since` / `--older`), then let
 /// the model answer from them.
@@ -224,7 +128,10 @@ pub fn ask(store: &Store, cfg: &Config, f: &FilterArgs, question: &str) -> Resul
     }
     let kws = keywords(question);
     let k = cfg.num("ask_turns").unwrap_or(15) as usize;
-    let best = rank(&turns, &kws, k);
+    let mut best = rank(&turns, &kws, k, 1);
+    if best.is_empty() {
+        best = turns.iter().take(k).collect(); // no keyword hit: the newest turns
+    }
     eprintln!(
         "[prinia] {} of {} turns{}{}",
         best.len(),
@@ -347,22 +254,6 @@ mod tests {
         assert!(picked("[\"x\"]", &offered).is_empty());
     }
 
-    fn turn_with(id: i64, instruction: &str, response: &str) -> Turn {
-        let mut t = Turn {
-            id,
-            when: String::new(),
-            provider: String::new(),
-            model: String::new(),
-            mode: String::new(),
-            input_tokens: 0,
-            output_tokens: 0,
-            content: Default::default(),
-        };
-        t.content.instruction = instruction.into();
-        t.content.response = response.into();
-        t
-    }
-
     #[test]
     fn time_words_and_keywords_come_from_the_question() {
         const D: i64 = 86_400;
@@ -376,26 +267,5 @@ mod tests {
             (Some(4 * D), Some(2 * D))
         );
         assert_eq!(parse_when("how do pipes work"), (None, None));
-        assert_eq!(
-            keywords("what was the issue with the API request last week"),
-            ["issue", "api", "request"]
-        );
-    }
-
-    #[test]
-    fn rank_prefers_prompt_matches_and_falls_back_to_newest() {
-        let turns = [
-            turn_with(3, "unrelated", "the api answered"),
-            turn_with(2, "why does the api request fail", "timeout"),
-            turn_with(1, "other", "other"),
-        ];
-        let kws = keywords("api request");
-        let ids: Vec<i64> = rank(&turns, &kws, 2).iter().map(|t| t.id).collect();
-        assert_eq!(ids, [2, 3]);
-        let none: Vec<i64> = rank(&turns, &keywords("zebra"), 2)
-            .iter()
-            .map(|t| t.id)
-            .collect();
-        assert_eq!(none, [3, 2], "no hit: the newest turns");
     }
 }

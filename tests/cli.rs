@@ -377,6 +377,64 @@ fn a_project_tag_picks_the_provider_that_has_it() {
 }
 
 #[test]
+fn context_pulls_in_older_turns_that_match_the_new_question() {
+    let mock = Mock::start("an answer", 200);
+    let env = Env::new("ctx-relevant", &mock);
+    for q in [
+        "how do I rotate the payments api keys",
+        "what is a unix pipe",
+        "explain git rebase",
+        "make vs ninja",
+        "list open ports",
+    ] {
+        env.run(&["-p", "local", q], "", &[]);
+    }
+    let on = [("PRINIA_CONTEXT", "1"), ("PRINIA_CONTEXT_OLDER", "0")];
+    let (_, err, code) = env.run(&["-p", "local", "-c", "payments api timeout"], "", &on);
+    assert_eq!(code, 0, "{err}");
+    let (_, body) = mock.last();
+    let all = body["messages"].to_string();
+    assert!(all.contains("rotate the payments api keys"), "{all}");
+    assert!(
+        all.contains("list open ports"),
+        "the newest turn is still sent verbatim"
+    );
+    assert!(
+        !all.contains("unix pipe") && !all.contains("git rebase"),
+        "{all}"
+    );
+    let (out, _, _) = env.run(&["context", "payments api timeout"], "", &on);
+    assert!(
+        out.contains("rotate the payments api keys") && !out.contains("unix pipe"),
+        "{out}"
+    );
+    // `context_relevant = 0` switches it off
+    let off = [
+        ("PRINIA_CONTEXT", "1"),
+        ("PRINIA_CONTEXT_OLDER", "0"),
+        ("PRINIA_CONTEXT_RELEVANT", "0"),
+    ];
+    env.run(&["-p", "local", "-c", "payments api timeout 2"], "", &off);
+    assert!(
+        !mock.last().1["messages"]
+            .to_string()
+            .contains("rotate the payments")
+    );
+}
+
+#[test]
+fn many_first_calls_at_once_share_one_key() {
+    let mock = Mock::start("answer", 200);
+    let env = Env::new("first-use-race", &mock);
+    let lines = (0..16).map(|n| format!("l{n}\n")).collect::<String>();
+    let (_, err, code) = env.run(&["-p", "local", "--each", "-j", "16", "q"], &lines, &[]);
+    assert_eq!(code, 0, "{err}");
+    // every turn decrypts with the one key that exists
+    let (out, err, code) = env.run(&["history", "show", "16"], "", &[]);
+    assert!(code == 0 && out.contains("answer"), "{out} {err}");
+}
+
+#[test]
 fn context_has_verbatim_turns_then_one_line_questions() {
     let mock = Mock::start("an answer", 200);
     let env = Env::new("ctx-tiers", &mock);

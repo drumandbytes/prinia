@@ -18,6 +18,7 @@ mod init;
 mod key;
 mod keychain;
 mod provider;
+mod retrieve;
 mod stats;
 mod store;
 
@@ -150,6 +151,8 @@ enum Cmd {
     },
     /// Show the context `-c` would send for this directory; `--summarize` builds the summaries first
     Context {
+        /// A question: shows which older turns it would pull in
+        question: Option<String>,
         /// Build and store summaries of older turns now (uses the fast tier of your provider)
         #[arg(long)]
         summarize: bool,
@@ -236,7 +239,10 @@ fn run() -> Result<()> {
     let keychain = cfg.bool("keychain").unwrap_or(false);
     match &cli.command {
         Some(Cmd::Config) => show_config(&cfg),
-        Some(Cmd::Context { summarize }) => {
+        Some(Cmd::Context {
+            question,
+            summarize,
+        }) => {
             let provider = Provider::resolve(&cfg, cli.provider.as_deref())?;
             let model = provider.model(&cfg, Tier::Fast)?;
             let store = Store::open(keychain)?;
@@ -246,9 +252,14 @@ fn run() -> Result<()> {
                 &store,
                 &context::Params {
                     dir: &dir,
-                    verbatim: (cfg.num("context").unwrap_or(0) as usize).max(5),
+                    verbatim: match cfg.num("context").unwrap_or(0) {
+                        0 => 5,
+                        n => n as usize,
+                    },
                     budget: cfg.num("context_chars").unwrap_or(16_000) as usize,
                     older: cfg.num("context_older").unwrap_or(30) as usize,
+                    query: question.as_deref().unwrap_or(""),
+                    relevant: cfg.num("context_relevant").unwrap_or(3) as usize,
                     summary: on.then(|| context::Summary {
                         provider: &provider,
                         model: &model,
@@ -610,6 +621,8 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
                 verbatim: ctx_turns,
                 budget: cfg.num("context_chars").unwrap_or(16_000) as usize,
                 older: cfg.num("context_older").unwrap_or(30) as usize,
+                query: &user,
+                relevant: cfg.num("context_relevant").unwrap_or(3) as usize,
                 summary: (cfg.bool("context_summary") == Some(true)).then(|| context::Summary {
                     provider: &provider,
                     model: &summary_model,
