@@ -82,6 +82,14 @@ struct Cli {
     #[arg(short = 't', long, value_name = "NAME")]
     template: Option<String>,
 
+    /// Run the instruction once per line of stdin, in parallel; answers are printed in input order
+    #[arg(long, conflicts_with_all = ["agent", "do_it", "cmd"])]
+    each: bool,
+
+    /// With --each: how many calls run at once
+    #[arg(short = 'j', long, default_value_t = 4, value_parser = clap::value_parser!(u32).range(1..=64))]
+    jobs: u32,
+
     /// Answer with one shell command and nothing else (what the shell widget uses)
     #[arg(long, conflicts_with_all = ["agent", "do_it", "json", "check"])]
     cmd: bool,
@@ -147,7 +155,7 @@ enum Cmd {
         #[arg(value_parser = ["zsh"])]
         shell: String,
     },
-    /// Allow the `.priniarc` files here to set providers, `run` and `write`
+    /// Allow the `.priniarc` files here to turn on `run` and `write`
     Trust,
     /// Back up, restore or rotate the key that protects the history
     Key {
@@ -277,8 +285,79 @@ fn run() -> Result<()> {
             action: Some(HistoryCmd::Clean { yes }),
             ..
         }) => history::clean(&Store::open(keychain)?, &cfg, *yes),
+        None if cli.each => each(&cli),
         None => ask(&cli, &cfg, keychain),
     }
+}
+
+/// One child `prinia` per stdin line, so caching, recording, checks and errors behave exactly as
+/// for a single call. Answers come back in input order; failed lines are reported and counted.
+fn each(cli: &Cli) -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let lines: Vec<&str> = input.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut args: Vec<String> = Vec::new();
+    let mut raw = std::env::args().skip(1);
+    while let Some(a) = raw.next() {
+        match a.as_str() {
+            "--each" => {}
+            "-j" | "--jobs" => {
+                raw.next();
+            }
+            _ if a.starts_with("--jobs=") => {}
+            _ => args.push(a),
+        }
+    }
+    let exe = std::env::current_exe()?;
+    let results = std::sync::Mutex::new(vec![None::<(String, bool)>; lines.len()]);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..(cli.jobs as usize).min(lines.len()) {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(line) = lines.get(i) else { return };
+                    let r = std::process::Command::new(&exe)
+                        .args(&args)
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|mut c| {
+                            let _ = c.stdin.take().map(|mut p| p.write_all(line.as_bytes()));
+                            c.wait_with_output()
+                        });
+                    let (text, ok) = match r {
+                        Ok(o) if o.status.success() => (
+                            String::from_utf8_lossy(&o.stdout).trim_end().to_string(),
+                            true,
+                        ),
+                        Ok(o) => (String::from_utf8_lossy(&o.stderr).trim().to_string(), false),
+                        Err(e) => (e.to_string(), false),
+                    };
+                    results.lock().unwrap()[i] = Some((text, ok));
+                    let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    eprintln!("[prinia] {n}/{}", lines.len());
+                }
+            });
+        }
+    });
+    let mut failed = 0;
+    for (i, r) in results.into_inner().unwrap().into_iter().enumerate() {
+        let (text, ok) = r.unwrap_or_default();
+        if ok {
+            let _ = writeln!(std::io::stdout(), "{text}");
+        } else {
+            failed += 1;
+            eprintln!("[prinia] line {} failed: {text}", i + 1);
+            let _ = writeln!(std::io::stdout());
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {} lines failed", lines.len());
+    }
+    Ok(())
 }
 
 fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {

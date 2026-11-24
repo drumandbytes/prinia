@@ -43,9 +43,9 @@ pub const KEYS: &[(&str, Ty)] = &[
     ("prompt_interactive", Ty::Str),
 ];
 
-/// Keys a repository's `.priniarc` may not set until the user runs `prinia trust`: they redirect
-/// the API key or let the model act on the machine.
-const RISKY: &[&str] = &["providers", "run", "write"];
+/// Keys a repository's `.priniarc` may not set until the user runs `prinia trust`: they let the
+/// model act on the machine. `[providers]` is never accepted from a repository.
+const RISKY: &[&str] = &["run", "write"];
 
 fn trust_path() -> Option<PathBuf> {
     Some(global_path()?.with_file_name("trusted"))
@@ -198,6 +198,13 @@ impl Config {
                 // a typo must not silently change behaviour, and a bad value must not shadow a
                 // good one from a lower layer
                 if k == "providers" {
+                    if !global {
+                        eprintln!(
+                            "[prinia] {}: providers are device-level; define them in your global config",
+                            p.display()
+                        );
+                        continue;
+                    }
                     match v {
                         Value::Table(ps) => cfg
                             .providers

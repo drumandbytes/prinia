@@ -59,6 +59,15 @@ The context comes from your own history, not from a provider's session, so it wo
 
 A call with context is cached separately from the same question without it.
 
+## One call per line
+
+```bash
+cat urls.txt | prinia --each "one-line summary of the page at this URL"
+git ls-files '*.py' | prinia --each -j 8 "does this file name suggest a test? answer yes or no"
+```
+
+`--each` makes a separate call for every non-empty stdin line, `-j N` at a time (default 4), and prints the answers in input order, one per line. Each call is cached and recorded like any other, so rerunning a half-finished batch only asks for what is missing. A failed line prints an empty answer, reports the reason on stderr, and the exit code is non-zero. Ask for one-line answers; a multi-line answer breaks the one-answer-per-line pairing.
+
 ## Templates
 
 Save an instruction you reuse as a file, then call it by name:

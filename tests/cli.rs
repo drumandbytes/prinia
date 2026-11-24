@@ -302,6 +302,31 @@ fn openai_compatible_provider() {
 }
 
 #[test]
+fn each_runs_one_call_per_line_and_reports_failures() {
+    let mock = Mock::start("answer", 200);
+    let env = Env::new("each", &mock);
+    let (out, err, code) = env.run(
+        &["-p", "local", "--each", "-j", "2", "summarize"],
+        "a\n\nb\nc\n",
+        &[],
+    );
+    assert_eq!(
+        (out.as_str(), code),
+        ("answer\nanswer\nanswer\n", 0),
+        "stderr: {err}"
+    );
+    assert_eq!(mock.hits(), 3, "blank lines are skipped, one call per line");
+
+    let bad = Mock::start("x", 401);
+    let env = Env::new("each-bad", &bad);
+    let (out, err, code) = env.run(&["-p", "local", "--each", "q"], "a\nb\n", &[]);
+    assert!(
+        code != 0 && out == "\n\n" && err.contains("line 1 failed"),
+        "{out:?} {err}"
+    );
+}
+
+#[test]
 fn piped_output_loses_its_code_fence() {
     let mock = Mock::start("```json\n{\"a\":1}\n```", 200);
     let env = Env::new("fence", &mock);
