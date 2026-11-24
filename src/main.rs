@@ -248,6 +248,10 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
         bail!("nothing to do. Usage: prinia \"question\"   or   cmd | prinia \"instruction\"");
     }
 
+    if !stdin_tty && payload.trim().is_empty() {
+        eprintln!("prinia: warning: stdin is empty, answering the instruction alone");
+    }
+
     // Raw output whenever either end is a pipe.
     let piped = !stdin_tty || !stdout_tty;
     let mode = if cli.agent {
