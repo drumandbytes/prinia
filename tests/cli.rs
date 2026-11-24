@@ -766,10 +766,6 @@ fn agent_changes_files_and_runs_commands_only_when_allowed() {
     env.run(&["-a", "--run", "go"], "", &[]);
     let r = result_of_first_call(&mock);
     assert!(r.contains("hi-from-run") && r.contains("[exit 0]"), "{r}");
-
-    // --write and --run only make sense with --agent
-    let (_, err, code) = env.run(&["--write", "x"], "", &[]);
-    assert!(code != 0 && err.contains("--agent"), "{err}");
 }
 
 #[test]

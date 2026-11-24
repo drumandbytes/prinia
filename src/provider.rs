@@ -210,6 +210,9 @@ impl Provider {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_connect(Some(Duration::from_secs(15)))
+            // ponytail: no idle timeout in ureq; these backstops cover a hung server, a cold local model load fits in 5 min
+            .timeout_recv_response(Some(Duration::from_secs(300)))
+            .timeout_recv_body(Some(Duration::from_secs(1800)))
             .build()
             .into();
 
@@ -275,6 +278,9 @@ impl Provider {
                 on_text(&t);
                 reply.text.push_str(&t);
             }
+        }
+        if reply.stop.is_empty() {
+            bail!("the response ended before the model finished (connection dropped?)");
         }
         reply.calls = reply
             .pending

@@ -34,6 +34,25 @@ export ANTHROPIC_API_KEY=...      # or OPENAI_API_KEY, or configure a local mode
 prinia "hello"
 ```
 
+### Local models
+
+No account or API key needed. With [Ollama](https://ollama.com) running:
+
+```bash
+ollama pull qwen2.5:14b       # ~9 GB; fits a 16 GB machine, fast on Apple silicon
+mkdir -p ~/.config/prinia && cat > ~/.config/prinia/config.toml <<'EOF'
+provider = "local"
+
+[providers.local]
+type = "openai"
+base_url = "http://localhost:11434/v1"
+model = "qwen2.5:14b"
+EOF
+prinia "how do I find the largest files in a directory?"
+```
+
+Small models (3B and under) invent commands and ignore instructions; `qwen2.5:14b` is a good starting point, and `qwen2.5:32b` is better if you have the memory. Other local runners with an OpenAI-compatible endpoint (LM Studio, llama.cpp, vLLM) work the same way with a different `base_url`.
+
 See [Install](docs/install.md) for other platforms and building from source, and [Configuration](docs/configuration.md) for local models and other providers.
 
 ## Usage
@@ -44,6 +63,7 @@ cmd | prinia "instruction" | cmd2    # a pipeline step
 prinia -f "..."                      # fast tier
 prinia -d "..."                      # reasoning tier
 prinia -p local "..."                # a configured provider
+prinia -x "..."                     # let the model run commands to answer (agent + --run)
 prinia -a "..."                     # agent: the model reads and searches files here (--write, --run to allow more)
 prinia -c "..."                     # include earlier turns from this directory
 prinia --no-cache "..."              # ask again even if the call is in your history

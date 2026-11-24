@@ -61,13 +61,21 @@ struct Cli {
     #[arg(short = 'a', long)]
     agent: bool,
 
+    /// Shorthand for --agent --run: let the model run commands to answer
+    #[arg(short = 'x', long = "do", conflicts_with = "no_agent")]
+    do_it: bool,
+
     /// With --agent: allow creating and editing files
-    #[arg(long, requires = "agent")]
+    #[arg(long)]
     write: bool,
 
     /// With --agent: allow running shell commands
-    #[arg(long, requires = "agent")]
+    #[arg(long)]
     run: bool,
+
+    /// Don't use agent mode, even if the `agent` setting is on
+    #[arg(long, conflicts_with = "agent")]
+    no_agent: bool,
 
     /// Require the answer to be valid JSON; ask again if it is not
     #[arg(long, conflicts_with = "agent")]
@@ -254,7 +262,12 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
 
     // Raw output whenever either end is a pipe.
     let piped = !stdin_tty || !stdout_tty;
-    let mode = if cli.agent {
+    let validate = cli.json || cli.check.is_some();
+    // The setting only applies at a terminal; pipelines stay plain filters.
+    let agent = cli.agent
+        || cli.do_it
+        || (!cli.no_agent && !validate && !piped && cfg.bool("agent").unwrap_or(false));
+    let mode = if agent {
         "agent"
     } else if piped {
         "pipe"
@@ -268,7 +281,6 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
             .unwrap_or_else(|| PROMPT_INTERACTIVE.into())
     };
 
-    let validate = cli.json || cli.check.is_some();
     let system = if cli.json {
         format!("{system} Respond with a single valid JSON value and nothing else.")
     } else {
@@ -310,7 +322,7 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
         bail!("`cache` must be \"pipe\", \"always\" or \"off\"");
     }
     let use_cache =
-        !cli.no_cache && !cli.agent && (cache_mode == "always" || (cache_mode == "pipe" && piped));
+        !cli.no_cache && !agent && (cache_mode == "always" || (cache_mode == "pipe" && piped));
 
     let cwd = std::env::current_dir()?;
     let dir = store::dir_hash(&cwd);
@@ -347,6 +359,7 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
                 &serde_json::json!(history).to_string(),
                 effort.as_deref().unwrap_or(""),
                 &max_tokens.map(|m| m.to_string()).unwrap_or_default(),
+                if agent { "agent" } else { "" },
             ])
         })
         .unwrap_or_default();
@@ -390,7 +403,7 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     let mut tried = 0;
     let (reply, mut text) = loop {
         tried += 1;
-        let reply = if cli.agent {
+        let reply = if agent {
             agent::run(
                 &agent::Opts {
                     cfg,
@@ -399,8 +412,8 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
                     effort: effort.as_deref(),
                     max_tokens,
                     user: &user,
-                    write: cli.write,
-                    run: cli.run,
+                    write: cli.write || cfg.bool("write").unwrap_or(false),
+                    run: cli.run || cli.do_it || cfg.bool("run").unwrap_or(false),
                 },
                 &mut show,
             )?

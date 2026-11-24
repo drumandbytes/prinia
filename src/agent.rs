@@ -77,6 +77,10 @@ fn resolve(root: &Path, p: &str) -> Result<PathBuf> {
     let canon = match joined.canonicalize() {
         Ok(c) => c,
         Err(_) => {
+            // a dangling symlink would be followed by the write
+            if joined.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+                bail!("{p:?} is a dangling symbolic link");
+            }
             let name = joined
                 .file_name()
                 .ok_or_else(|| anyhow!("bad path {p:?}"))?;
@@ -233,6 +237,8 @@ fn run_command(root: &Path, a: &Value) -> Result<String> {
         c.args(["-c", &format!("({cmd}) 2>&1")]);
         c
     };
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut c, 0);
     let mut child = c
         .current_dir(root)
         .stdin(Stdio::null())
@@ -250,6 +256,11 @@ fn run_command(root: &Path, a: &Value) -> Result<String> {
             break Some(s);
         }
         if started.elapsed() > Duration::from_secs(60) {
+            // kill the group, or a background grandchild keeps the output pipe open
+            #[cfg(unix)]
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{}", child.id())])
+                .status();
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -360,5 +371,23 @@ mod tests {
         assert!(resolve(&root, "../x").is_err());
         assert!(resolve(&root, "/etc/passwd").is_err());
         assert!(resolve(&root, ".").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlinks_are_refused() {
+        let root = std::env::temp_dir()
+            .join("prinia-symlink-test")
+            .canonicalize()
+            .unwrap_or_else(|_| {
+                let d = std::env::temp_dir().join("prinia-symlink-test");
+                std::fs::create_dir_all(&d).unwrap();
+                d.canonicalize().unwrap()
+            });
+        let link = root.join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("/nonexistent-outside/new", &link).unwrap();
+        assert!(resolve(&root, "link").is_err());
+        let _ = std::fs::remove_file(&link);
     }
 }

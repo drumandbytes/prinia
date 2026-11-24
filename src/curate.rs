@@ -81,6 +81,9 @@ fn picked(reply: &str, offered: &[Turn]) -> Vec<i64> {
     let (Some(a), Some(b)) = (reply.find('['), reply.rfind(']')) else {
         return Vec::new();
     };
+    if a > b {
+        return Vec::new();
+    }
     let ids: Vec<i64> = serde_json::from_str(&reply[a..=b]).unwrap_or_default();
     offered
         .iter()
@@ -144,6 +147,7 @@ mod tests {
         let offered = [turn(1), turn(2), turn(3)];
         assert_eq!(picked("```json\n[3, 1, 99]\n```", &offered), [1, 3]);
         assert!(picked("no idea", &offered).is_empty());
+        assert!(picked("x] y [3", &offered).is_empty()); // ] before [ must not panic
         assert!(picked("[\"x\"]", &offered).is_empty());
     }
 }
