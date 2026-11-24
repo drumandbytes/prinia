@@ -7,7 +7,7 @@ Every setting can be given four ways. The first that applies wins:
 3. An **environment variable**: `PRINIA_` plus the setting name in capitals, e.g. `PRINIA_MAX_TOKENS=2000`
 4. The **global config**: `~/.config/prinia/config.toml` (`$XDG_CONFIG_HOME` is respected, on Windows `%APPDATA%\prinia`; `PRINIA_CONFIG` points at another file)
 
-A directory beats the environment on purpose: a project that says `record = false` or `run = false` keeps saying it, whatever your shell exports. Only a flag overrides it, for one call.
+A directory beats the environment on purpose: a project that says `record = false` or `run = false` keeps saying it, whatever your shell exports. Only a flag overrides it, for one call. This is safe because a project file can only set behaviour (below), never where your data goes.
 
 ```toml
 # ~/.config/prinia/config.toml, or .priniarc in a project
@@ -18,9 +18,11 @@ cache_ttl = "3d"
 
 `prinia config` prints every setting, its effective value and its source (`directory`, `env`, `global` or `default`), the files that were read and the configured providers. Unknown keys and values of the wrong type are reported on stderr and ignored, so a typo never silently changes behaviour. Booleans in environment variables accept `1/0`, `true/false`, `yes/no`, `on/off`.
 
-Providers (URLs and key names) are device-level: `[providers.*]` is only read from your global config, and a `.priniarc` that defines one is ignored with a warning. A `.priniarc` can still choose among your providers with `provider = "local"`. A repository's `.priniarc` also cannot turn on `run` or `write` (they let the model act on your machine) until you read the file and run `prinia trust`; turning them off needs no trust. Trust is tied to the file's exact contents, so any later change, such as from a `git pull`, needs trusting again. Your own global config is always trusted.
+A `.priniarc` holds behaviour only: `record`, `cache`, `cache_ttl`, `context`, `context_chars`, `max_tokens`, `effort`, `fast_under`, `deep_over`, `check_retries`, `max_input`, `agent`, `agent_steps`, `run`, `write` and the two prompts. Everything about the device is read only from your global config and ignored, with a warning, in a project file: `[providers.*]`, `provider`, the model names, `keychain` and the history limits. A repository therefore cannot choose where your prompts go.
 
-A `.priniarc` is how a project gets its own behaviour: a repository that should never be recorded says `record = false`; one that must use a local model says `provider = "local"`.
+Settings that let the model act on your machine or change what it is told (`run`, `write`, `agent`, `prompt_pipe`, `prompt_interactive`) are ignored in a project file until you read it and run `prinia trust`. Turning `run`, `write` or `agent` off needs no trust. Trust is tied to the file's exact contents, so any later change, such as from a `git pull`, needs trusting again. Your own global config is always trusted.
+
+A `.priniarc` is how a project gets its own behaviour: a repository that should never be recorded says `record = false`, one that must never run commands says `run = false`.
 
 ## Providers
 

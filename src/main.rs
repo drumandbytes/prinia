@@ -290,13 +290,9 @@ fn run() -> Result<()> {
     }
 }
 
-/// One child `prinia` per stdin line, so caching, recording, checks and errors behave exactly as
-/// for a single call. Answers come back in input order; failed lines are reported and counted.
-fn each(cli: &Cli) -> Result<()> {
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
-    let lines: Vec<&str> = input.lines().filter(|l| !l.trim().is_empty()).collect();
-    let mut args: Vec<String> = Vec::new();
+/// The command line without the flags that only drive batching.
+fn child_args() -> Vec<String> {
+    let mut args = Vec::new();
     let mut raw = std::env::args().skip(1);
     while let Some(a) = raw.next() {
         match a.as_str() {
@@ -308,27 +304,37 @@ fn each(cli: &Cli) -> Result<()> {
             _ => args.push(a),
         }
     }
-    let exe = std::env::current_exe()?;
-    let results = std::sync::Mutex::new(vec![None::<(String, bool)>; lines.len()]);
+    args
+}
+
+/// One child `prinia` per input, `jobs` at a time, so caching, recording, checks and errors behave
+/// exactly as for a single call. Results come back in input order as (text, succeeded).
+fn fan_out(args: &[String], inputs: &[String], jobs: usize) -> Vec<(String, bool)> {
+    let Ok(exe) = std::env::current_exe() else {
+        return vec![("cannot find the prinia binary".into(), false); inputs.len()];
+    };
+    let results = std::sync::Mutex::new(vec![(String::new(), false); inputs.len()]);
     let next = std::sync::atomic::AtomicUsize::new(0);
     let done = std::sync::atomic::AtomicUsize::new(0);
     std::thread::scope(|s| {
-        for _ in 0..(cli.jobs as usize).min(lines.len()) {
+        for _ in 0..jobs.min(inputs.len()) {
             s.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let Some(line) = lines.get(i) else { return };
+                    let Some(input) = inputs.get(i) else { return };
                     let r = std::process::Command::new(&exe)
-                        .args(&args)
+                        .args(args)
+                        // chunks are already small; never split them again
+                        .env("PRINIA_MAX_INPUT", "0")
                         .stdin(std::process::Stdio::piped())
                         .stdout(std::process::Stdio::piped())
                         .stderr(std::process::Stdio::piped())
                         .spawn()
                         .and_then(|mut c| {
-                            let _ = c.stdin.take().map(|mut p| p.write_all(line.as_bytes()));
+                            let _ = c.stdin.take().map(|mut p| p.write_all(input.as_bytes()));
                             c.wait_with_output()
                         });
-                    let (text, ok) = match r {
+                    let r = match r {
                         Ok(o) if o.status.success() => (
                             String::from_utf8_lossy(&o.stdout).trim_end().to_string(),
                             true,
@@ -336,16 +342,29 @@ fn each(cli: &Cli) -> Result<()> {
                         Ok(o) => (String::from_utf8_lossy(&o.stderr).trim().to_string(), false),
                         Err(e) => (e.to_string(), false),
                     };
-                    results.lock().unwrap()[i] = Some((text, ok));
+                    results.lock().unwrap()[i] = r;
                     let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                    eprintln!("[prinia] {n}/{}", lines.len());
+                    eprintln!("[prinia] {n}/{}", inputs.len());
                 }
             });
         }
     });
+    results.into_inner().unwrap()
+}
+
+fn each(cli: &Cli) -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let lines: Vec<String> = input
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
     let mut failed = 0;
-    for (i, r) in results.into_inner().unwrap().into_iter().enumerate() {
-        let (text, ok) = r.unwrap_or_default();
+    for (i, (text, ok)) in fan_out(&child_args(), &lines, cli.jobs as usize)
+        .into_iter()
+        .enumerate()
+    {
         if ok {
             let _ = writeln!(std::io::stdout(), "{text}");
         } else {
@@ -357,6 +376,83 @@ fn each(cli: &Cli) -> Result<()> {
     if failed > 0 {
         bail!("{failed} of {} lines failed", lines.len());
     }
+    Ok(())
+}
+
+/// Pieces of at most `max` characters, cut at line ends where possible.
+fn chunks(text: &str, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in text.split_inclusive('\n') {
+        let mut rest = line;
+        while cur.chars().count() + rest.chars().count() > max {
+            let room = max - cur.chars().count();
+            if room == 0 {
+                out.push(std::mem::take(&mut cur));
+                continue;
+            }
+            // a single over-long line is cut mid-line
+            let cut = rest.char_indices().nth(room).map_or(rest.len(), |(i, _)| i);
+            if cur.is_empty() {
+                out.push(rest[..cut].to_string());
+                rest = &rest[cut..];
+            } else {
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push_str(rest);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Input over `max_input` characters: run the instruction on each piece, then once more over the
+/// partial answers.
+fn map_reduce(cli: &Cli, instruction: &str, payload: &str, max: usize) -> Result<()> {
+    let pieces = chunks(payload, max);
+    eprintln!(
+        "[prinia] input is {} characters; processing it in {} parts",
+        payload.chars().count(),
+        pieces.len()
+    );
+    let partial = fan_out(&child_args(), &pieces, cli.jobs as usize);
+    if let Some(i) = partial.iter().position(|(_, ok)| !ok) {
+        bail!("part {} failed: {}", i + 1, partial[i].0);
+    }
+    let joined = partial
+        .iter()
+        .enumerate()
+        .map(|(i, (t, _))| format!("--- part {} ---\n{t}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let final_instruction = format!(
+        "The input was too long, so the instruction below was applied to consecutive parts of it separately; the results are given as the input. Combine them into one final answer to the instruction, without mentioning the parts.\n\nInstruction: {instruction}"
+    );
+    let mut args = child_args();
+    // the final call carries the full instruction itself, so drop the template and the original one
+    let mut skip = false;
+    args.retain(|a| {
+        if skip {
+            skip = false;
+            return false;
+        }
+        match a.as_str() {
+            "-t" | "--template" => {
+                skip = true;
+                false
+            }
+            _ if a.starts_with("--template=") => false,
+            _ => cli.prompt.as_deref() != Some(a.as_str()),
+        }
+    });
+    args.push(final_instruction);
+    let (text, ok) = fan_out(&args, &[joined], 1).remove(0);
+    if !ok {
+        bail!("{text}");
+    }
+    println!("{text}");
     Ok(())
 }
 
@@ -380,6 +476,10 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
         bail!("nothing to do. Usage: prinia \"question\"   or   cmd | prinia \"instruction\"");
     }
 
+    let max_input = cfg.num("max_input").unwrap_or(0) as usize;
+    if max_input > 0 && payload.chars().count() > max_input && !cli.cmd {
+        return map_reduce(cli, &instruction, &payload, max_input);
+    }
     if !stdin_tty && payload.trim().is_empty() {
         eprintln!("prinia: warning: stdin is empty, answering the instruction alone");
     }
@@ -748,6 +848,20 @@ fn show_config(cfg: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunks_cut_at_lines_and_lose_nothing() {
+        let text = "aaaa\nbbbb\ncc\n";
+        let c = chunks(text, 10);
+        assert_eq!(c, ["aaaa\nbbbb\n", "cc\n"]);
+        assert_eq!(chunks("xxxxxxxxxxxx", 5).concat(), "xxxxxxxxxxxx");
+        assert!(
+            chunks("é".repeat(7).as_str(), 3)
+                .iter()
+                .all(|p| p.chars().count() <= 3)
+        );
+        assert!(chunks("", 5).is_empty());
+    }
 
     #[test]
     fn combine_and_fence() {

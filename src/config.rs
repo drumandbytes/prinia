@@ -36,6 +36,7 @@ pub const KEYS: &[(&str, Ty)] = &[
     ("agent", Ty::Bool),
     ("write", Ty::Bool),
     ("run", Ty::Bool),
+    ("max_input", Ty::Num),
     ("agent_steps", Ty::Num),
     ("check_retries", Ty::Num),
     ("keychain", Ty::Bool),
@@ -43,9 +44,33 @@ pub const KEYS: &[(&str, Ty)] = &[
     ("prompt_interactive", Ty::Str),
 ];
 
-/// Keys a repository's `.priniarc` may not set until the user runs `prinia trust`: they let the
-/// model act on the machine. `[providers]` is never accepted from a repository.
-const RISKY: &[&str] = &["run", "write"];
+/// Behaviour keys a repository's `.priniarc` may not turn on until the user runs `prinia trust`:
+/// they let the model act on the machine or change what it is told.
+const RISKY: &[&str] = &["run", "write", "agent", "prompt_pipe", "prompt_interactive"];
+
+/// What a repository's `.priniarc` may set: how prinia behaves in that directory. Where data goes
+/// (provider, models, keys) and how the shared history is kept are decisions for the device.
+const PROJECT: &[&str] = &[
+    "record",
+    "cache",
+    "cache_ttl",
+    "context",
+    "context_chars",
+    "max_tokens",
+    "effort",
+    "fast_effort",
+    "deep_effort",
+    "fast_under",
+    "deep_over",
+    "check_retries",
+    "max_input",
+    "agent",
+    "agent_steps",
+    "run",
+    "write",
+    "prompt_pipe",
+    "prompt_interactive",
+];
 
 fn trust_path() -> Option<PathBuf> {
     Some(global_path()?.with_file_name("trusted"))
@@ -187,6 +212,15 @@ impl Config {
                 }
             };
             for (k, v) in t {
+                if !global && k != "providers" && !PROJECT.contains(&k.as_str()) {
+                    if KEYS.iter().any(|(n, _)| *n == k) {
+                        eprintln!(
+                            "[prinia] {}: `{k}` is device-level; set it in your global config",
+                            p.display()
+                        );
+                        continue;
+                    }
+                }
                 // a repo may always tighten (`run = false`); loosening needs trust
                 if !trusted && RISKY.contains(&k.as_str()) && v != Value::Boolean(false) {
                     eprintln!(
@@ -308,13 +342,17 @@ mod tests {
         fs::create_dir_all(&sub).unwrap();
         let global = root.join("global.toml");
         fs::write(&global, "record = false\nmodel = \"g\"\nmax_tokens = 100\n[providers.local]\ntype = \"openai\"\nbase_url = \"http://x/v1\"\n").unwrap();
-        fs::write(root.join(".priniarc"), "model = \"proj\"\nrecrod = true\n").unwrap();
-        fs::write(sub.join(".priniarc"), "record = true\nmodel = 5\n").unwrap();
+        fs::write(
+            root.join(".priniarc"),
+            "cache_ttl = \"proj\"\nrecrod = true\n",
+        )
+        .unwrap();
+        fs::write(sub.join(".priniarc"), "record = true\ncache_ttl = 5\n").unwrap();
 
         let c = Config::load_from(Some(global), &sub);
         assert_eq!(c.bool("record"), Some(true), "nearest file wins");
         assert_eq!(
-            c.str("model").as_deref(),
+            c.str("cache_ttl").as_deref(),
             Some("proj"),
             "a wrongly typed value does not shadow the parent's"
         );

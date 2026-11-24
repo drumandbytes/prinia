@@ -59,6 +59,17 @@ The context comes from your own history, not from a provider's session, so it wo
 
 A call with context is cached separately from the same question without it.
 
+## Long input
+
+Models have a context limit. Set `max_input` (characters, `0` = off, which is the default) and prinia handles longer stdin in two steps: it runs your instruction on each part separately (in parallel, `-j` at a time, cut at line ends), then asks once more to combine the partial answers.
+
+```bash
+prinia init                                   # sets max_input = 48000 for a local model
+cat huge.log | PRINIA_MAX_INPUT=40000 prinia "what went wrong, in 5 bullets?"
+```
+
+This works for summaries and extraction. It does not work for questions that need the whole text at once, such as counting across parts or comparing the first line with the last: each part is answered blind to the others, and a small model's combined answer to those can be wrong. `max_input` is a project setting too.
+
 ## One call per line
 
 ```bash
