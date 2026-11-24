@@ -521,6 +521,7 @@ mod tests {
             .optional()
             .unwrap();
         assert!(pending.is_none(), "the rotation was finished");
+        drop(s); // Windows will not delete a file that is still open
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
