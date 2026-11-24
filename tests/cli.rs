@@ -6,6 +6,15 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Windows cannot open a socket without `SystemRoot` (os error 10106), so a cleared
+/// environment keeps it, and the temp folders, wherever they exist.
+fn windows_basics() -> Vec<(String, String)> {
+    ["SystemRoot", "TEMP", "TMP"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+        .collect()
+}
+
 #[derive(Clone)]
 enum Step {
     Text(&'static str),
@@ -193,6 +202,7 @@ impl Env {
         cmd.args(args)
             .current_dir(self.dir.join("work"))
             .env_clear()
+            .envs(windows_basics())
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", &self.dir)
             .env("PRINIA_CONFIG", self.dir.join("cfg/config.toml"))
@@ -794,6 +804,7 @@ fn context_comes_from_history_of_this_directory() {
         .args(["-c", "seventh question"])
         .current_dir(env.dir.join("work/other"))
         .env_clear()
+        .envs(windows_basics())
         .env("HOME", &env.dir)
         .env("PRINIA_CONFIG", env.dir.join("cfg/config.toml"))
         .env("PRINIA_DB", env.db())
@@ -991,6 +1002,7 @@ fn stats_count_calls_hits_and_tokens_without_the_key() {
         .args(["stats", "--here", "--json"])
         .current_dir(env.dir.join("work/elsewhere"))
         .env_clear()
+        .envs(windows_basics())
         .env("HOME", &env.dir)
         .env("PRINIA_CONFIG", env.dir.join("cfg/config.toml"))
         .env("PRINIA_DB", env.db())
