@@ -1,8 +1,33 @@
-use crate::store::{Filter, Store};
+//! Earlier turns from this directory's history, sent as context. Three tiers by age:
+//! the newest turns word for word, then one line per older question, then (opt-in) model-written
+//! summaries of still older blocks of turns. Summaries are derived from the history, cached by the
+//! exact turns they cover, and dropped whenever anything is deleted.
+use crate::provider::{Provider, Request};
+use crate::store::{Filter, Store, Turn};
 use anyhow::Result;
 
 const USER_CAP: usize = 2_000;
 const REPLY_CAP: usize = 4_000;
+/// Turns are grouped into blocks by `id / BLOCK`; a block is summarized once, when no new turn can
+/// land in it any more.
+const BLOCK: i64 = 25;
+const LIST_LIMIT: usize = 1_000;
+
+pub struct Params<'a> {
+    pub dir: &'a str,
+    pub verbatim: usize,
+    pub budget: usize,
+    /// How many turns beyond the verbatim ones are listed as one-line questions.
+    pub older: usize,
+    /// Summarize older blocks with this provider and model (the call's own, so privacy rules hold).
+    pub summary: Option<Summary<'a>>,
+}
+
+pub struct Summary<'a> {
+    pub provider: &'a Provider,
+    pub model: &'a str,
+    pub blocks: usize,
+}
 
 fn cut(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -12,36 +37,148 @@ fn cut(s: &str, max: usize) -> String {
     format!("{head}\n[...cut]")
 }
 
-/// The newest `turns` turns from this directory as (user, assistant) messages, oldest first,
-/// kept within `budget` characters (the oldest turns are dropped first).
-pub fn build(
-    store: &Store,
-    dir: &str,
-    turns: usize,
-    budget: usize,
-) -> Result<Vec<(String, String)>> {
+fn user_text(t: &Turn) -> String {
+    let c = &t.content;
+    match (c.instruction.is_empty(), c.payload.is_empty()) {
+        (false, false) => format!("{}\n\n{}", c.instruction, c.payload),
+        (false, true) => c.instruction.clone(),
+        _ => c.payload.clone(),
+    }
+}
+
+fn question(t: &Turn) -> String {
+    let first = if t.content.instruction.is_empty() {
+        &t.content.payload
+    } else {
+        &t.content.instruction
+    };
+    let line = first.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let short: String = line.trim().chars().take(160).collect();
+    format!("- {short}")
+}
+
+fn note(title: &str, body: &str) -> (String, String) {
+    (format!("{title}\n{body}"), "Understood.".to_string())
+}
+
+/// Turns summarized per block are cut so a block fits any model.
+fn block_text(turns: &[&Turn]) -> String {
+    turns
+        .iter()
+        .map(|t| {
+            format!(
+                "Q: {}\nA: {}",
+                cut(&user_text(t), 300),
+                cut(t.content.response.trim(), 300)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn summarize(store: &Store, s: &Summary, block: &[&Turn]) -> Result<String> {
+    let ids = block
+        .iter()
+        .map(|t| t.id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let key = store.cache_key(&["summary-v1", &s.provider.identity(), s.model, &ids]);
+    if let Some(hit) = store.summary_get(&key)? {
+        return Ok(hit);
+    }
+    let text = block_text(block);
+    let req = Request {
+        model: s.model,
+        system: "Summarize this stretch of a user's terminal question-and-answer history in under 120 words. Keep names, commands, file paths, decisions and open questions. No preamble.",
+        user: &text,
+        history: &[],
+        tools: &[],
+        follow: &[],
+        effort: None,
+        max_tokens: Some(400),
+    };
+    let reply = s.provider.complete(&req, &mut |_| {})?;
+    let out = reply.text.trim().to_string();
+    if !out.is_empty() && reply.stop != "max_tokens" && reply.stop != "length" {
+        store.summary_put(&key, &out)?;
+    }
+    Ok(out)
+}
+
+/// Messages to send before the new one, oldest first.
+pub fn build(store: &Store, p: &Params) -> Result<Vec<(String, String)>> {
     let filter = Filter {
-        dir: Some(dir.to_string()),
+        dir: Some(p.dir.to_string()),
         ..Filter::default()
     };
-    let mut out = Vec::new();
+    let limit = if p.summary.is_some() {
+        LIST_LIMIT
+    } else {
+        p.verbatim + p.older
+    };
+    let turns = store.list(&filter, limit)?; // newest first
+
+    // tier 1: newest turns word for word, within the character budget
     let mut used = 0;
-    for t in store.list(&filter, turns)? {
-        let c = t.content;
-        let user = match (c.instruction.is_empty(), c.payload.is_empty()) {
-            (false, false) => format!("{}\n\n{}", c.instruction, c.payload),
-            (false, true) => c.instruction,
-            _ => c.payload,
-        };
-        let pair = (cut(&user, USER_CAP), cut(c.response.trim_end(), REPLY_CAP));
+    let mut recent = Vec::new();
+    for t in turns.iter().take(p.verbatim) {
+        let pair = (
+            cut(&user_text(t), USER_CAP),
+            cut(t.content.response.trim_end(), REPLY_CAP),
+        );
         let size = pair.0.chars().count() + pair.1.chars().count();
-        if used + size > budget {
+        if used + size > p.budget {
             break;
         }
         used += size;
-        out.push(pair);
+        recent.push(pair);
     }
-    out.reverse();
+    recent.reverse();
+
+    // tier 2: one line per older question
+    let rest = &turns[recent.len()..];
+    let asked = &rest[..p.older.min(rest.len())];
+    let beyond = &rest[asked.len()..];
+
+    let mut out = Vec::new();
+    // tier 3: summaries of complete older blocks, newest blocks first, at most `blocks` of them
+    if let Some(s) = &p.summary {
+        let edge = rest.first().map_or(i64::MAX, |_| {
+            turns[..recent.len() + asked.len()]
+                .iter()
+                .map(|t| t.id)
+                .min()
+                .unwrap_or(i64::MAX)
+        }) / BLOCK;
+        let mut by_block: std::collections::BTreeMap<i64, Vec<&Turn>> = Default::default();
+        for t in beyond.iter().filter(|t| t.id / BLOCK < edge) {
+            by_block.entry(t.id / BLOCK).or_default().push(t);
+        }
+        let mut lines = Vec::new();
+        for (_, mut block) in by_block.into_iter().rev().take(s.blocks) {
+            block.reverse(); // oldest first
+            match summarize(store, s, &block) {
+                Ok(t) if !t.is_empty() => lines.push(format!("- {}", t.replace('\n', " "))),
+                Ok(_) => {}
+                Err(e) => eprintln!("[prinia] could not summarize older turns: {e}"),
+            }
+        }
+        if !lines.is_empty() {
+            lines.reverse(); // oldest first
+            out.push(note(
+                "Summaries of older exchanges in this directory (oldest first), for background:",
+                &lines.join("\n"),
+            ));
+        }
+    }
+    if !asked.is_empty() {
+        let lines: Vec<String> = asked.iter().rev().map(question).collect();
+        out.push(note(
+            "Earlier questions asked in this directory (oldest first), for background:",
+            &lines.join("\n"),
+        ));
+    }
+    out.extend(recent);
     Ok(out)
 }
 

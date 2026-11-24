@@ -191,6 +191,10 @@ impl Store {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (day, dir)
              );
+             CREATE TABLE IF NOT EXISTS summaries (
+                key TEXT PRIMARY KEY,
+                content BLOB NOT NULL
+             );
              PRAGMA user_version = {SCHEMA_VERSION};"
         ))?;
 
@@ -389,8 +393,32 @@ impl Store {
         Ok(())
     }
 
+    /// A stored summary of a block of turns (see `context`), keyed by the exact turns it covers.
+    pub fn summary_get(&self, key: &str) -> Result<Option<String>> {
+        let blob: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT content FROM summaries WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        blob.map(|b| Ok(String::from_utf8_lossy(&unseal(&self.data_key, &b)?).into_owned()))
+            .transpose()
+    }
+
+    pub fn summary_put(&self, key: &str, text: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO summaries (key, content) VALUES (?1, ?2)",
+            params![key, seal(&self.data_key, text.as_bytes())?],
+        )?;
+        Ok(())
+    }
+
     pub fn delete(&self, ids: &[i64]) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
+        // a summary may contain what was just deleted; they are rebuilt on demand
+        tx.execute("DELETE FROM summaries", [])?;
         let mut n = 0;
         for id in ids {
             n += tx.execute("DELETE FROM turns WHERE id = ?1", params![id])?;

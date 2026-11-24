@@ -377,6 +377,100 @@ fn a_project_tag_picks_the_provider_that_has_it() {
 }
 
 #[test]
+fn context_has_verbatim_turns_then_one_line_questions() {
+    let mock = Mock::start("an answer", 200);
+    let env = Env::new("ctx-tiers", &mock);
+    for q in [
+        "first question",
+        "second question",
+        "third question",
+        "fourth question",
+    ] {
+        env.run(&["-p", "local", q], "", &[]);
+    }
+    let (_, err, code) = env.run(
+        &["-p", "local", "-c", "fifth"],
+        "",
+        &[("PRINIA_CONTEXT", "1"), ("PRINIA_CONTEXT_OLDER", "2")],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (_, body) = mock.last();
+    let msgs = body["messages"].as_array().unwrap();
+    let text: Vec<String> = msgs
+        .iter()
+        .map(|m| m["content"].as_str().unwrap_or("").to_string())
+        .collect();
+    // system, questions note, "Understood.", the newest turn, its answer, the new question
+    assert!(text[1].contains("Earlier questions"), "{text:?}");
+    assert!(
+        text[1].contains("- second question") && text[1].contains("- third question"),
+        "{}",
+        text[1]
+    );
+    assert!(
+        !text[1].contains("first question") && !text[1].contains("fourth"),
+        "{}",
+        text[1]
+    );
+    assert_eq!(text[3], "fourth question");
+    assert_eq!(text.last().unwrap(), "fifth");
+}
+
+#[test]
+fn context_command_shows_what_c_would_send() {
+    let mock = Mock::start("an answer", 200);
+    let env = Env::new("ctx-show", &mock);
+    let (out, _, _) = env.run(&["-p", "local", "context"], "", &[]);
+    assert!(out.contains("no history"), "{out}");
+    for q in ["alpha question", "beta question"] {
+        env.run(&["-p", "local", q], "", &[]);
+    }
+    let (out, err, code) = env.run(&["-p", "local", "context"], "", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("alpha question")
+            && out.contains("beta question")
+            && out.contains("an answer"),
+        "{out}"
+    );
+}
+
+#[test]
+fn old_blocks_are_summarized_once_and_rebuilt_after_a_delete() {
+    let mock = Mock::start("an answer", 200);
+    let env = Env::new("ctx-summary", &mock);
+    for n in 0..60 {
+        env.run(&["-p", "local", &format!("question {n}")], "", &[]);
+    }
+    let on = [
+        ("PRINIA_CONTEXT", "1"),
+        ("PRINIA_CONTEXT_OLDER", "2"),
+        ("PRINIA_CONTEXT_SUMMARY", "1"),
+    ];
+    let before = mock.hits();
+    let (_, err, code) = env.run(&["-p", "local", "-c", "next"], "", &on);
+    assert_eq!(code, 0, "{err}");
+    // two complete older blocks were summarized, then the real call
+    assert_eq!(mock.hits(), before + 3);
+    let (_, body) = mock.last();
+    let first = body["messages"][1]["content"].as_str().unwrap();
+    assert!(first.starts_with("Summaries of older exchanges"), "{first}");
+    let before = mock.hits();
+    env.run(&["-p", "local", "-c", "again"], "", &on);
+    assert_eq!(
+        mock.hits(),
+        before + 1,
+        "summaries come from the stored copy"
+    );
+
+    // deleting any turn drops the stored summaries; they are rebuilt from what is left
+    env.run(&["history", "rm", "3", "--yes"], "", &[]);
+    let before = mock.hits();
+    env.run(&["-p", "local", "-c", "after delete"], "", &on);
+    assert_eq!(mock.hits(), before + 3);
+}
+
+#[test]
 fn piped_output_loses_its_code_fence() {
     let mock = Mock::start("```json\n{\"a\":1}\n```", 200);
     let env = Env::new("fence", &mock);
@@ -492,9 +586,10 @@ fn context_comes_from_history_of_this_directory() {
         "",
         &[("PRINIA_CONTEXT", "1")],
     );
-    assert_eq!(mock.last().1["messages"].as_array().unwrap().len(), 4);
+    // system + older-questions note (2) + the one verbatim turn (2) + the new question
+    assert_eq!(mock.last().1["messages"].as_array().unwrap().len(), 6);
     env.run(&args("", "fifth question"), "", &[("PRINIA_CONTEXT", "1")]);
-    assert_eq!(mock.last().1["messages"].as_array().unwrap().len(), 4);
+    assert_eq!(mock.last().1["messages"].as_array().unwrap().len(), 6);
     env.run(
         &args("--no-context", "sixth"),
         "",

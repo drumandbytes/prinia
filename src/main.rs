@@ -148,6 +148,12 @@ enum Cmd {
         #[arg(long)]
         format: Option<String>,
     },
+    /// Show the context `-c` would send for this directory; `--summarize` builds the summaries first
+    Context {
+        /// Build and store summaries of older turns now (uses the fast tier of your provider)
+        #[arg(long)]
+        summarize: bool,
+    },
     /// Find a local model server, pick a model for this machine and write the config
     Init,
     /// Print the shell integration to load: `eval "$(prinia shell zsh)"`
@@ -230,6 +236,34 @@ fn run() -> Result<()> {
     let keychain = cfg.bool("keychain").unwrap_or(false);
     match &cli.command {
         Some(Cmd::Config) => show_config(&cfg),
+        Some(Cmd::Context { summarize }) => {
+            let provider = Provider::resolve(&cfg, cli.provider.as_deref())?;
+            let model = provider.model(&cfg, Tier::Fast)?;
+            let store = Store::open(keychain)?;
+            let dir = store::dir_hash(&std::env::current_dir()?);
+            let on = *summarize || cfg.bool("context_summary") == Some(true);
+            let msgs = context::build(
+                &store,
+                &context::Params {
+                    dir: &dir,
+                    verbatim: (cfg.num("context").unwrap_or(0) as usize).max(5),
+                    budget: cfg.num("context_chars").unwrap_or(16_000) as usize,
+                    older: cfg.num("context_older").unwrap_or(30) as usize,
+                    summary: on.then(|| context::Summary {
+                        provider: &provider,
+                        model: &model,
+                        blocks: cfg.num("context_blocks").unwrap_or(4) as usize,
+                    }),
+                },
+            )?;
+            if msgs.is_empty() {
+                println!("no history in this directory yet");
+            }
+            for (user, assistant) in msgs {
+                println!("[you]\n{user}\n[model]\n{assistant}\n");
+            }
+            Ok(())
+        }
         Some(Cmd::Init) => init::run(),
         Some(Cmd::Shell { .. }) => {
             print!("{}", include_str!("../scripts/prinia.zsh"));
@@ -534,6 +568,9 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     };
     let effort = provider.effort(cfg, tier);
     let max_tokens = cfg.num("max_tokens");
+    let summary_model = provider
+        .model(cfg, Tier::Fast)
+        .unwrap_or_else(|_| model.clone());
     let user = combine(&instruction, &payload);
 
     let record = if cli.record {
@@ -568,9 +605,17 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     let history = match &store {
         Some(s) if ctx_turns > 0 => context::build(
             s,
-            &dir,
-            ctx_turns,
-            cfg.num("context_chars").unwrap_or(16_000) as usize,
+            &context::Params {
+                dir: &dir,
+                verbatim: ctx_turns,
+                budget: cfg.num("context_chars").unwrap_or(16_000) as usize,
+                older: cfg.num("context_older").unwrap_or(30) as usize,
+                summary: (cfg.bool("context_summary") == Some(true)).then(|| context::Summary {
+                    provider: &provider,
+                    model: &summary_model,
+                    blocks: cfg.num("context_blocks").unwrap_or(4) as usize,
+                }),
+            },
         )?,
         _ => Vec::new(),
     };
