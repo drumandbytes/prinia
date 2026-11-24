@@ -16,6 +16,8 @@ cache_ttl = "3d"
 
 `prinia config` prints every setting, its effective value and its source (`env`, `config` or `default`), the files that were read and the configured providers. Unknown keys and values of the wrong type are reported on stderr and ignored, so a typo never silently changes behaviour. Booleans in environment variables accept `1/0`, `true/false`, `yes/no`, `on/off`.
 
+A repository's `.priniarc` cannot set `providers`, `run` or `write` (they could send your API key elsewhere or let the model run commands) until you read the file and run `prinia trust`. Trust is tied to the file's exact contents, so any later change, such as from a `git pull`, needs trusting again. Your own global config is always trusted.
+
 A `.priniarc` is how a project gets its own behaviour: a repository that should never be recorded says `record = false`; one that must use a local model says `provider = "local"`.
 
 ## Providers

@@ -127,6 +127,8 @@ enum Cmd {
         #[arg(long)]
         format: Option<String>,
     },
+    /// Allow the `.priniarc` files here to set providers, `run` and `write`
+    Trust,
     /// Back up, restore or rotate the key that protects the history
     Key {
         #[command(subcommand)]
@@ -200,6 +202,16 @@ fn run() -> Result<()> {
     let keychain = cfg.bool("keychain").unwrap_or(false);
     match &cli.command {
         Some(Cmd::Config) => show_config(&cfg),
+        Some(Cmd::Trust) => {
+            let done = config::trust(&std::env::current_dir()?)?;
+            if done.is_empty() {
+                bail!("no .priniarc here or above");
+            }
+            for p in done {
+                println!("trusted {}", p.display());
+            }
+            Ok(())
+        }
         Some(Cmd::Key { action }) => key_cmd(action, keychain),
         Some(Cmd::Stats {
             here,

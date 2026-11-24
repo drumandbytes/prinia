@@ -43,6 +43,48 @@ pub const KEYS: &[(&str, Ty)] = &[
     ("prompt_interactive", Ty::Str),
 ];
 
+/// Keys a repository's `.priniarc` may not set until the user runs `prinia trust`: they redirect
+/// the API key or let the model act on the machine.
+const RISKY: &[&str] = &["providers", "run", "write"];
+
+fn trust_path() -> Option<PathBuf> {
+    Some(global_path()?.with_file_name("trusted"))
+}
+
+fn digest(text: &str) -> String {
+    blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+fn is_trusted(text: &str) -> bool {
+    trust_path()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .is_some_and(|t| t.lines().any(|l| l.trim() == digest(text)))
+}
+
+/// Trusts the exact current contents of every `.priniarc` above `cwd`; an edit revokes it.
+pub fn trust(cwd: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let Some(tp) = trust_path() else {
+        return Ok(Vec::new());
+    };
+    let mut known = fs::read_to_string(&tp).unwrap_or_default();
+    let mut done = Vec::new();
+    for p in cwd.ancestors().map(|d| d.join(".priniarc")) {
+        let Ok(text) = fs::read_to_string(&p) else {
+            continue;
+        };
+        if !is_trusted(&text) {
+            known.push_str(&digest(&text));
+            known.push('\n');
+        }
+        done.push(p);
+    }
+    if let Some(d) = tp.parent() {
+        fs::create_dir_all(d)?;
+    }
+    fs::write(tp, known)?;
+    Ok(done)
+}
+
 pub struct Config {
     table: Table,
     providers: Table,
@@ -102,6 +144,8 @@ impl Config {
             let Ok(text) = fs::read_to_string(&p) else {
                 continue;
             };
+            let global = Some(&p) == global_path().as_ref();
+            let trusted = global || is_trusted(&text);
             let t = match toml::from_str::<Table>(&text) {
                 Ok(t) => t,
                 Err(e) => {
@@ -110,6 +154,13 @@ impl Config {
                 }
             };
             for (k, v) in t {
+                if !trusted && RISKY.contains(&k.as_str()) {
+                    eprintln!(
+                        "[prinia] {}: `{k}` ignored until you run `prinia trust` here",
+                        p.display()
+                    );
+                    continue;
+                }
                 // a typo must not silently change behaviour, and a bad value must not shadow a
                 // good one from a lower layer
                 if k == "providers" {
