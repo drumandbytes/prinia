@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use config::Config;
-use provider::{Provider, Request, Tier};
+use provider::{Provider, Reply, Request, Tier};
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio, exit};
@@ -517,9 +517,8 @@ fn map_reduce(cli: &Cli, instruction: &str, payload: &str, max: usize) -> Result
     Ok(())
 }
 
-fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
-    let stdin_tty = std::io::stdin().is_terminal();
-    let stdout_tty = std::io::stdout().is_terminal();
+/// The instruction (with any template) and the piped input.
+fn read_input(cli: &Cli, stdin_tty: bool) -> Result<(String, String)> {
     let mut payload = String::new();
     if !stdin_tty {
         std::io::stdin().read_to_string(&mut payload)?;
@@ -536,33 +535,10 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     if instruction.is_empty() && payload.trim().is_empty() {
         bail!("nothing to do. Usage: prinia \"question\"   or   cmd | prinia \"instruction\"");
     }
+    Ok((instruction, payload))
+}
 
-    let max_input = cfg.num("max_input").unwrap_or(0) as usize;
-    if max_input > 0
-        && payload.chars().count() > max_input
-        && !cli.cmd
-        && std::env::var_os("PRINIA_CHILD").is_none()
-    {
-        return map_reduce(cli, &instruction, &payload, max_input);
-    }
-    if !stdin_tty && payload.trim().is_empty() {
-        eprintln!("prinia: warning: stdin is empty, answering the instruction alone");
-    }
-
-    // Raw output whenever either end is a pipe.
-    let piped = !stdin_tty || !stdout_tty || cli.cmd;
-    let validate = cli.json || cli.check.is_some();
-    // The setting only applies at a terminal; pipelines stay plain filters.
-    let agent = cli.agent
-        || cli.do_it
-        || (!cli.no_agent && !validate && !piped && cfg.bool("agent").unwrap_or(false));
-    let mode = if agent {
-        "agent"
-    } else if piped {
-        "pipe"
-    } else {
-        "interactive"
-    };
+fn system_prompt(cli: &Cli, cfg: &Config, piped: bool) -> String {
     let system = if cli.cmd {
         cmd_prompt()
     } else if piped {
@@ -571,15 +547,15 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
         cfg.str("prompt_interactive")
             .unwrap_or_else(|| PROMPT_INTERACTIVE.into())
     };
-
-    let system = if cli.json {
+    if cli.json {
         format!("{system} Respond with a single valid JSON value and nothing else.")
     } else {
         system
-    };
+    }
+}
 
-    let provider = Provider::resolve(cfg, cli.provider.as_deref())?;
-    let size = combine(&instruction, &payload).chars().count() as u64;
+/// The tier (a flag, else the size rules) and the model for it.
+fn route(cli: &Cli, cfg: &Config, provider: &Provider, size: u64) -> Result<(Tier, String)> {
     let tier = if cli.fast {
         Tier::Fast
     } else if cli.deep {
@@ -597,12 +573,174 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
         Some(m) => m.clone(),
         None => provider.model(cfg, tier)?,
     };
+    Ok((tier, model))
+}
+
+/// How many earlier turns this call sends (`-c`, `--no-context`, the `context` setting).
+fn context_turns(cli: &Cli, cfg: &Config) -> usize {
+    let setting = cfg.num("context").unwrap_or(0) as usize;
+    if cli.no_context {
+        0
+    } else if cli.context {
+        if setting > 0 { setting } else { 5 }
+    } else {
+        setting
+    }
+}
+
+/// One model call (or an agent run), retried while a `--json` / `--check` validation fails.
+struct Call<'a> {
+    cli: &'a Cli,
+    cfg: &'a Config,
+    provider: &'a Provider,
+    req: Request<'a>,
+    agent: bool,
+    piped: bool,
+}
+
+impl Call<'_> {
+    fn run(&self) -> Result<(Reply, String)> {
+        let (cli, cfg) = (self.cli, self.cfg);
+        let validate = cli.json || cli.check.is_some();
+        // A terminal gets the answer as it arrives; a pipe gets it whole, so a wrapping code fence
+        // can be stripped. NOTE: filter the fence while streaming if piped latency ever matters.
+        let piped = self.piped;
+        let mut show = |piece: &str| {
+            if !piped && !validate {
+                print!("{piece}");
+                let _ = std::io::stdout().flush();
+            }
+        };
+        // Checks need the whole answer, so nothing is printed (or saved) until it passes.
+        let attempts = if validate {
+            cfg.num("check_retries").unwrap_or(2) + 1
+        } else {
+            1
+        };
+        let mut tried = 0;
+        loop {
+            tried += 1;
+            let reply = if self.agent {
+                agent::run(
+                    &agent::Opts {
+                        cfg,
+                        provider: self.provider,
+                        model: self.req.model,
+                        effort: self.req.effort,
+                        max_tokens: self.req.max_tokens,
+                        user: self.req.user,
+                        write: cli.write || cfg.bool("write").unwrap_or(false),
+                        run: cli.run || cli.do_it || cfg.bool("run").unwrap_or(false),
+                        yes: cli.yes,
+                    },
+                    &mut show,
+                )?
+            } else {
+                self.provider.complete(&self.req, &mut show)?
+            };
+            if reply.stop == "refusal" {
+                bail!("the model declined this request");
+            }
+            let text = if piped || validate {
+                strip_fence(&reply.text)
+            } else {
+                reply.text.clone()
+            };
+            if !validate || check::passes(&text, cli.json, cli.check.as_deref()) {
+                return Ok((reply, text));
+            }
+            if tried >= attempts {
+                bail!("the answer failed the check {tried} time(s); nothing was printed or saved");
+            }
+            eprintln!("[prinia] the answer failed the check; asking again ({tried}/{attempts})");
+        }
+    }
+}
+
+/// Everything `record_turn` saves besides the answer.
+struct Recorded<'a> {
+    dir: &'a str,
+    cwd: &'a Path,
+    provider: &'a Provider,
+    mode: &'a str,
+    tier: &'a str,
+    cache_key: &'a str,
+    started: Instant,
+    instruction: String,
+    payload: String,
+}
+
+/// Bookkeeping happens after the output is out, so nothing downstream waits for it.
+fn record_turn(s: &Store, cfg: &Config, r: Recorded, reply: &Reply, text: String) {
+    let cut_off = matches!(reply.stop.as_str(), "max_tokens" | "length");
+    let (repo, branch) = git_info(r.cwd);
+    let meta = Meta {
+        dir: r.dir,
+        provider: &r.provider.name,
+        model: &reply.model,
+        mode: r.mode,
+        tier: r.tier,
+        input_tokens: reply.input_tokens,
+        output_tokens: reply.output_tokens,
+        duration_ms: r.started.elapsed().as_millis() as u64,
+        // an answer cut off at the limit stays in the history but never answers a later call
+        cache_key: if cut_off { "" } else { r.cache_key },
+    };
+    let content = Content {
+        instruction: r.instruction,
+        payload: r.payload,
+        response: text,
+        cwd: r.cwd.to_string_lossy().into_owned(),
+        repo,
+        branch,
+    };
+    if let Err(e) = s.record(&meta, &content) {
+        eprintln!("[prinia] history not saved: {e:#}");
+    } else {
+        history::enforce_limits(s, cfg);
+    }
+}
+
+fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
+    let stdin_tty = std::io::stdin().is_terminal();
+    let (instruction, payload) = read_input(cli, stdin_tty)?;
+
+    let max_input = cfg.num("max_input").unwrap_or(0) as usize;
+    if max_input > 0
+        && payload.chars().count() > max_input
+        && !cli.cmd
+        && std::env::var_os("PRINIA_CHILD").is_none()
+    {
+        return map_reduce(cli, &instruction, &payload, max_input);
+    }
+    if !stdin_tty && payload.trim().is_empty() {
+        eprintln!("prinia: warning: stdin is empty, answering the instruction alone");
+    }
+
+    // Raw output whenever either end is a pipe.
+    let piped = !stdin_tty || !std::io::stdout().is_terminal() || cli.cmd;
+    let validate = cli.json || cli.check.is_some();
+    // The setting only applies at a terminal; pipelines stay plain filters.
+    let agent = cli.agent
+        || cli.do_it
+        || (!cli.no_agent && !validate && !piped && cfg.bool("agent").unwrap_or(false));
+    let mode = if agent {
+        "agent"
+    } else if piped {
+        "pipe"
+    } else {
+        "interactive"
+    };
+    let system = system_prompt(cli, cfg, piped);
+
+    let provider = Provider::resolve(cfg, cli.provider.as_deref())?;
+    let user = combine(&instruction, &payload);
+    let (tier, model) = route(cli, cfg, &provider, user.chars().count() as u64)?;
     let effort = provider.effort(cfg, tier);
     let max_tokens = cfg.num("max_tokens");
     let summary_model = provider
         .model(cfg, Tier::Fast)
         .unwrap_or_else(|_| model.clone());
-    let user = combine(&instruction, &payload);
 
     let record = if cli.record {
         true
@@ -620,14 +758,7 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
 
     let cwd = std::env::current_dir()?;
     let dir = store::dir_hash(&cwd);
-    let setting = cfg.num("context").unwrap_or(0) as usize;
-    let ctx_turns = if cli.no_context {
-        0
-    } else if cli.context {
-        if setting > 0 { setting } else { 5 }
-    } else {
-        setting
-    };
+    let ctx_turns = context_turns(cli, cfg);
     let store = if record || use_cache || ctx_turns > 0 {
         Some(Store::open(keychain)?)
     } else {
@@ -681,67 +812,20 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     }
 
     let started = Instant::now();
-    let req = Request {
-        model: &model,
-        system: &system,
-        user: &user,
-        history: &history,
-        tools: &[],
-        follow: &[],
-        effort: effort.as_deref(),
-        max_tokens,
+    let call = Call {
+        cli,
+        cfg,
+        provider: &provider,
+        req: Request {
+            history: &history,
+            effort: effort.as_deref(),
+            max_tokens,
+            ..Request::plain(&model, &system, &user)
+        },
+        agent,
+        piped,
     };
-    // A terminal gets the answer as it arrives; a pipe gets it whole, so a wrapping code fence
-    // can be stripped. NOTE: filter the fence while streaming if piped latency ever matters.
-    let mut show = |piece: &str| {
-        if !piped && !validate {
-            print!("{piece}");
-            let _ = std::io::stdout().flush();
-        }
-    };
-    // Checks need the whole answer, so nothing is printed (or saved) until it passes.
-    let attempts = if validate {
-        cfg.num("check_retries").unwrap_or(2) + 1
-    } else {
-        1
-    };
-    let mut tried = 0;
-    let (reply, mut text) = loop {
-        tried += 1;
-        let reply = if agent {
-            agent::run(
-                &agent::Opts {
-                    cfg,
-                    provider: &provider,
-                    model: &model,
-                    effort: effort.as_deref(),
-                    max_tokens,
-                    user: &user,
-                    write: cli.write || cfg.bool("write").unwrap_or(false),
-                    run: cli.run || cli.do_it || cfg.bool("run").unwrap_or(false),
-                    yes: cli.yes,
-                },
-                &mut show,
-            )?
-        } else {
-            provider.complete(&req, &mut show)?
-        };
-        if reply.stop == "refusal" {
-            bail!("the model declined this request");
-        }
-        let text = if piped || validate {
-            strip_fence(&reply.text)
-        } else {
-            reply.text.clone()
-        };
-        if !validate || check::passes(&text, cli.json, cli.check.as_deref()) {
-            break (reply, text);
-        }
-        if tried >= attempts {
-            bail!("the answer failed the check {tried} time(s); nothing was printed or saved");
-        }
-        eprintln!("[prinia] the answer failed the check; asking again ({tried}/{attempts})");
-    };
+    let (reply, mut text) = call.run()?;
     if !text.ends_with('\n') {
         text.push('\n');
         if !piped && !validate {
@@ -753,43 +837,28 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
         let _ = std::io::stdout().write_all(text.as_bytes());
     }
     let _ = std::io::stdout().flush();
-    let cut_off = matches!(reply.stop.as_str(), "max_tokens" | "length");
-    if cut_off {
+    if matches!(reply.stop.as_str(), "max_tokens" | "length") {
         eprintln!("[prinia] the answer was cut off at the output limit (raise `max_tokens`)");
     }
 
-    // Bookkeeping happens after the output is out, so nothing downstream waits for it.
     if record && let Some(s) = &store {
-        let (repo, branch) = git_info(&cwd);
-        let meta = Meta {
-            dir: &dir,
-            provider: &provider.name,
-            model: &reply.model,
-            mode,
-            tier: if cli.model.is_some() {
-                "custom"
-            } else {
-                tier.name()
-            },
-            input_tokens: reply.input_tokens,
-            output_tokens: reply.output_tokens,
-            duration_ms: started.elapsed().as_millis() as u64,
-            // an answer cut off at the limit stays in the history but never answers a later call
-            cache_key: if cut_off { "" } else { &cache_key },
+        let tier = if cli.model.is_some() {
+            "custom"
+        } else {
+            tier.name()
         };
-        let content = Content {
+        let r = Recorded {
+            dir: &dir,
+            cwd: &cwd,
+            provider: &provider,
+            mode,
+            tier,
+            cache_key: &cache_key,
+            started,
             instruction,
             payload,
-            response: text,
-            cwd: cwd.to_string_lossy().into_owned(),
-            repo,
-            branch,
         };
-        if let Err(e) = s.record(&meta, &content) {
-            eprintln!("[prinia] history not saved: {e:#}");
-        } else {
-            history::enforce_limits(s, cfg);
-        }
+        record_turn(s, cfg, r, &reply, text);
     }
     Ok(())
 }

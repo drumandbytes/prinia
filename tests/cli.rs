@@ -540,6 +540,22 @@ fn trust_shows_the_file_asks_and_expires_when_the_file_changes() {
 }
 
 #[test]
+fn init_reports_when_there_is_no_model_server_and_writes_nothing() {
+    let mock = Mock::start("x", 200);
+    let env = Env::new("init", &mock);
+    let down = [("PRINIA_OLLAMA_URL", "http://127.0.0.1:1")];
+    let (out, _, code) = env.run(&["init"], "", &down);
+    assert_eq!(code, 0);
+    assert!(out.contains("An API key is set"), "{out}");
+    let (out, _, code) = env.run(&["init"], "", &[down[0], ("ANTHROPIC_API_KEY", "")]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("No model server found at http://127.0.0.1:1"),
+        "{out}"
+    );
+}
+
+#[test]
 fn many_first_calls_at_once_share_one_key() {
     let mock = Mock::start("answer", 200);
     let env = Env::new("first-use-race", &mock);

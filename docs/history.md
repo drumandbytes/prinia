@@ -73,7 +73,7 @@ prinia history ask "what did I ask about TLS last month?"
 2. **Keywords:** the remaining meaningful words are matched against prompt, input and answer; a match in the prompt counts most. With no keyword hit, the newest turns are used.
 3. **Answer:** the best `ask_turns` turns (default 15) go to the model with longer excerpts (`excerpt_prompt` 400, `excerpt_reply` 1000 characters), and it answers citing `#id`. If they do not contain the answer it should say so. stderr lists the turns used; open one with `prinia history show ID`.
 
-Those excerpts leave your machine like any other prompt, so `ask` uses your configured provider and the `private` / `tag` rules apply. It is not recorded. Matching is plain words, not meaning: ask with the words you would have used at the time.
+Those excerpts leave your machine like any other prompt, so `ask` uses your configured provider and the `private` / `tag` rules apply. Turns made with a `private` provider are left out unless the provider answering is `private` too (the same goes for `history agent`). It is not recorded. Matching is plain words, not meaning: ask with the words you would have used at the time.
 
 ## Deleting
 

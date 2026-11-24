@@ -35,14 +35,9 @@ fn call(cfg: &Config, tier: Tier, system: &str, user: &str, show: bool) -> Resul
     let model = provider.model(cfg, tier)?;
     let effort = provider.effort(cfg, tier);
     let req = Request {
-        model: &model,
-        system,
-        user,
-        history: &[],
-        tools: &[],
-        follow: &[],
         effort: effort.as_deref(),
         max_tokens: cfg.num("max_tokens"),
+        ..Request::plain(&model, system, user)
     };
     let reply = provider.complete(&req, &mut |piece| {
         if show {

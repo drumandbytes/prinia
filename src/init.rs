@@ -7,6 +7,11 @@ use std::time::Duration;
 
 const OLLAMA: &str = "http://localhost:11434";
 
+/// `PRINIA_OLLAMA_URL` points at another server (and lets tests avoid the real one).
+fn ollama() -> String {
+    std::env::var("PRINIA_OLLAMA_URL").unwrap_or_else(|_| OLLAMA.into())
+}
+
 /// (regular model, approximate download in GB, deep model) for this much memory.
 fn recommend(gb: u64) -> (&'static str, u64, Option<&'static str>) {
     match gb {
@@ -47,7 +52,7 @@ fn installed() -> Option<Vec<String>> {
         .build()
         .into();
     let v: serde_json::Value = agent
-        .get(format!("{OLLAMA}/api/tags"))
+        .get(format!("{}/api/tags", ollama()))
         .call()
         .ok()?
         .body_mut()
@@ -87,16 +92,28 @@ fn pull(model: &str, gb: u64) -> Result<()> {
     Ok(())
 }
 
+/// The global config for a local Ollama model.
+fn config_text(url: &str, model: &str, deep: Option<&str>) -> String {
+    let mut cfg = format!(
+        "provider = \"local\"\nmax_input = 48000   # longer input is processed in parts\n\n[providers.local]\ntype = \"openai\"\ntags = [\"private\"]\nbase_url = \"{url}/v1\"\nmodel = \"{model}\"\nfast_model = \"{model}\"\n"
+    );
+    if let Some(d) = deep {
+        cfg.push_str(&format!("deep_model = \"{d}\"\n"));
+    }
+    cfg
+}
+
 pub fn run() -> Result<()> {
     let keys = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
         .iter()
-        .any(|k| std::env::var_os(k).is_some());
+        .any(|k| std::env::var(k).is_ok_and(|v| !v.is_empty()));
     let Some(_) = installed() else {
         if keys {
             println!("An API key is set in your environment: `prinia \"hello\"` already works.");
         } else {
             println!(
-                "No model server found at {OLLAMA} and no API key set.\nInstall Ollama (https://ollama.com), start it and run `prinia init` again, or export ANTHROPIC_API_KEY / OPENAI_API_KEY."
+                "No model server found at {} and no API key set.\nInstall Ollama (https://ollama.com), start it and run `prinia init` again, or export ANTHROPIC_API_KEY / OPENAI_API_KEY.",
+                ollama()
             );
         }
         return Ok(());
@@ -114,12 +131,7 @@ pub fn run() -> Result<()> {
     if let Some(d) = deep {
         pull(d, 20)?;
     }
-    let mut cfg = format!(
-        "provider = \"local\"\nmax_input = 48000   # longer input is processed in parts\n\n[providers.local]\ntype = \"openai\"\ntags = [\"private\"]\nbase_url = \"{OLLAMA}/v1\"\nmodel = \"{model}\"\nfast_model = \"{model}\"\n"
-    );
-    if let Some(d) = deep {
-        cfg.push_str(&format!("deep_model = \"{d}\"\n"));
-    }
+    let cfg = config_text(&ollama(), model, deep);
     let path = config::global_path().ok_or_else(|| anyhow!("no config directory"))?;
     if path.exists() {
         println!(
@@ -137,6 +149,19 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_written_config_is_valid_toml_with_the_model_private_and_tiered() {
+        let t: toml::Table = toml::from_str(&config_text("http://h:1", "m1", Some("m2"))).unwrap();
+        let p = &t["providers"]["local"];
+        assert_eq!(p["base_url"].as_str(), Some("http://h:1/v1"));
+        assert_eq!(p["tags"][0].as_str(), Some("private"));
+        assert_eq!(
+            (p["model"].as_str(), p["deep_model"].as_str()),
+            (Some("m1"), Some("m2"))
+        );
+        assert_eq!(t["max_input"].as_integer(), Some(48000));
+    }
 
     #[test]
     fn model_scales_with_memory() {

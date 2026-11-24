@@ -20,7 +20,7 @@ cache_ttl = "3d"
 
 A `.priniarc` holds behaviour only: `record`, `cache`, `cache_ttl`, `context`, `context_chars`, `max_tokens`, `effort`, `fast_under`, `deep_over`, `check_retries`, `max_input`, `agent`, `agent_steps`, `run`, `write` and the two prompts. Everything about the device is read only from your global config and ignored, with a warning, in a project file: `[providers.*]`, `provider`, the model names, `keychain` and the history limits. A repository therefore cannot choose where your prompts go.
 
-Settings that let the model act on your machine or change what it is told (`run`, `write`, `agent`, `prompt_pipe`, `prompt_interactive`) are ignored in a project file until you read it and run `prinia trust`. Turning `run`, `write` or `agent` off needs no trust. Trust is tied to the file's exact contents, so any later change, such as from a `git pull`, needs trusting again. Your own global config is always trusted.
+Settings that let the model act on your machine or change what it is told (`run`, `write`, `agent`, `prompt_pipe`, `prompt_interactive`) are ignored in a project file until you run `prinia trust`, which prints each file and asks before trusting it (`--yes` skips the question). Turning `run`, `write` or `agent` off needs no trust. Trust is tied to the file's exact contents, so any later change, such as from a `git pull`, needs trusting again. Your own global config is always trusted.
 
 ### Tags and private mode
 

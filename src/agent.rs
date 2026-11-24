@@ -387,14 +387,11 @@ pub fn run(o: &Opts, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
     let mut total = Reply::default();
     for _ in 0..max {
         let req = Request {
-            model: o.model,
-            system: &system,
-            user: o.user,
-            history: &[],
             tools: &tools,
             follow: &follow,
             effort: o.effort,
             max_tokens: o.max_tokens,
+            ..Request::plain(o.model, &system, o.user)
         };
         let r = o.provider.complete(&req, &mut |_| {})?;
         total.input_tokens += r.input_tokens;

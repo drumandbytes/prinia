@@ -85,6 +85,22 @@ pub struct Request<'a> {
     pub max_tokens: Option<u64>,
 }
 
+impl<'a> Request<'a> {
+    /// A single question with no earlier turns and no tools; callers override what they need.
+    pub fn plain(model: &'a str, system: &'a str, user: &'a str) -> Self {
+        Request {
+            model,
+            system,
+            user,
+            history: &[],
+            tools: &[],
+            follow: &[],
+            effort: None,
+            max_tokens: None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Reply {
     pub text: String,

@@ -22,13 +22,13 @@ The model then decides per question whether to call a tool. The `agent` setting 
 
 | Tool | Needs | What it does |
 | :--- | :--- | :--- |
-| `read_file` | nothing | Reads a text file, with line numbers, optionally a line range |
+| `read_file` | nothing | Reads a text file (regular files up to 10 MB), with line numbers, optionally a line range |
 | `list_dir` | nothing | Lists a directory |
 | `search` | nothing | Finds lines containing a text (case-insensitive) under a path; skips hidden directories, `target` and `node_modules` |
 | `write_file`, `replace` | `--write` | Creates or overwrites a file; replaces one exact, unique piece of text |
 | `run_command` | `--run` | Runs a shell command (asking first unless read-only) in the directory and returns its output and exit code; stopped after 60 seconds |
 
-Reading is the default and changes nothing. Writing and running commands are separate switches, so you can allow one without the other. `--run` asks before each command on your terminal (`[y/N]`), except a pipeline of read-only commands (`ls`, `cat`, `find`, `grep`, `rg`, `git status|log|diff|show`, `date`, ...), which runs straight away. Anything with `;`, `&&`, `$(...)`, redirects, or flags like `find -exec` or `-delete` asks. With no terminal to ask on, such a command is refused and the model is told. `-y` (`--yes`) runs everything without asking. `--write` has no per-file confirmation, so use it in a git repository where changes can be reviewed.
+Reading is the default and changes nothing. Writing and running commands are separate switches, so you can allow one without the other. `--run` asks before each command on your terminal (`[y/N]`), except a pipeline of read-only commands (`ls`, `cat`, `head`, `find`, `grep`, `rg`, `sort`, `wc`, `date`, ...), which runs straight away. Anything with `;`, `&&`, `$(...)`, redirects, or flags that write or run a program (`find -exec`, `-delete`, `sort -o`, `rg --pre`) asks. `git` always asks, because a repository's own config can make even `git status` run a program. With no terminal to ask on, such a command is refused and the model is told. `-y` (`--yes`) runs everything without asking. `--write` has no per-file confirmation, so use it in a git repository where changes can be reviewed.
 
 All file tools stay inside the directory you ran the command in. A path that leaves it, by `..`, an absolute path or a symbolic link, is refused. `run_command` is not limited this way, since a shell command can do anything your account can.
 

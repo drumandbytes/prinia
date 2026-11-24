@@ -55,12 +55,12 @@ prinia "what does SIGPIPE do?"
 prinia -c "and how do I ignore it in Rust?"
 ```
 
-The context comes from your own history, not from a provider's session, so it works with any provider and survives a switch of model. Only turns from the current directory are used, oldest first, and long turns are cut. Set `context = 5` (a number of turns) to include it on every call and `--no-context` to leave it out once. `context_chars` (default 16000) caps its size; the oldest turns are dropped first. Calls made with `--no-record` are not in the history, so they are never part of a context.
+Turns made with a provider tagged `private` are never sent to a provider that is not (see [Tags and private mode](configuration.md#tags-and-private-mode)). The context comes from your own history, not from a provider's session, so it works with any provider and survives a switch of model. Only turns from the current directory are used, oldest first, and long turns are cut. Set `context = 5` (a number of turns) to include it on every call and `--no-context` to leave it out once. `context_chars` (default 16000) caps its size; the oldest turns are dropped first. Calls made with `--no-record` are not in the history, so they are never part of a context.
 
 Older turns are not simply dropped. The context has four tiers:
 
 1. **Recent turns, word for word**: the newest `context` turns.
-2. **Relevant older turns, in full**: up to `context_relevant` turns (default 3; `0` turns it off) from further back that match the words of your new question (prompt matches count most; a word that is in most of your turns is ignored). They use up to half of `context_chars`. This is what lets `prinia -c "why did the payments API time out again?"` find the exchange from three weeks ago.
+2. **Relevant older turns, in full**: up to `context_relevant` turns (default 3; `0` turns it off) from further back that match the words of your new question (prompt matches count most; a word that is in most of your turns is ignored). They use up to half of `context_chars`. Only the newest 300 turns of the directory are searched. This is what lets `prinia -c "why did the payments API time out again?"` find the exchange from three weeks ago.
 3. **Older questions, one line each**: the next `context_older` turns (default 30; `0` turns it off), cut to 160 characters, so the model knows what you were working on.
 4. **Summaries** (opt-in, `context_summary = true`): older turns are grouped into blocks of about 25 history entries, and each finished block is summarized once by the fast tier of the *same provider as the call*, so `private` and `tag` rules hold. Only the newest `context_blocks` blocks (default 4) are included. A summary is stored encrypted next to the history and is derived from it: any delete (`history rm`, size or age limits) drops all stored summaries, and they are rebuilt from what is left. Summaries are lossy; the model can be wrong about details it never saw in full.
 

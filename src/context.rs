@@ -12,7 +12,7 @@ const REPLY_CAP: usize = 4_000;
 /// Turns are grouped into blocks by `id / BLOCK`; a block is summarized once, when no new turn can
 /// land in it any more.
 const BLOCK: i64 = 25;
-const LIST_LIMIT: usize = 1_000;
+const LIST_LIMIT: usize = 300;
 
 pub struct Params<'a> {
     pub dir: &'a str,
@@ -94,14 +94,12 @@ fn summarize(store: &Store, s: &Summary, block: &[&Turn]) -> Result<String> {
     }
     let text = block_text(block);
     let req = Request {
-        model: s.model,
-        system: "Summarize this stretch of a user's terminal question-and-answer history in under 120 words. Keep names, commands, file paths, decisions and open questions. No preamble.",
-        user: &text,
-        history: &[],
-        tools: &[],
-        follow: &[],
-        effort: None,
         max_tokens: Some(400),
+        ..Request::plain(
+            s.model,
+            "Summarize this stretch of a user's terminal question-and-answer history in under 120 words. Keep names, commands, file paths, decisions and open questions. No preamble.",
+            &text,
+        )
     };
     let reply = s.provider.complete(&req, &mut |_| {})?;
     let out = reply.text.trim().to_string();
