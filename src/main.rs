@@ -165,8 +165,12 @@ enum Cmd {
         #[arg(value_parser = ["zsh"])]
         shell: String,
     },
-    /// Allow the `.priniarc` files here to turn on `run` and `write`
-    Trust,
+    /// Show the `.priniarc` files here and above, and allow them to turn on `run`, `write` and `agent`
+    Trust {
+        /// Skip the question
+        #[arg(long)]
+        yes: bool,
+    },
     /// Back up, restore or rotate the key that protects the history
     Key {
         #[command(subcommand)]
@@ -282,14 +286,24 @@ fn run() -> Result<()> {
             print!("{}", include_str!("../scripts/prinia.zsh"));
             Ok(())
         }
-        Some(Cmd::Trust) => {
-            let done = config::trust(&std::env::current_dir()?)?;
-            if done.is_empty() {
+        Some(Cmd::Trust { yes }) => {
+            let files = config::project_files(&std::env::current_dir()?);
+            if files.is_empty() {
                 bail!("no .priniarc here or above");
             }
-            for p in done {
-                println!("trusted {}", p.display());
+            let pending: Vec<_> = files.iter().filter(|f| !f.2).collect();
+            if pending.is_empty() {
+                println!("already trusted");
+                return Ok(());
             }
+            for (p, text, _) in &pending {
+                println!("--- {} ---\n{}", p.display(), text.trim_end());
+            }
+            if !history::confirm("Trust these files exactly as shown?", *yes)? {
+                bail!("not trusted");
+            }
+            config::trust(&pending.iter().map(|f| f.1.as_str()).collect::<Vec<_>>())?;
+            println!("trusted {} file(s)", pending.len());
             Ok(())
         }
         Some(Cmd::Key { action }) => key_cmd(action, keychain),
@@ -371,8 +385,8 @@ fn fan_out(args: &[String], inputs: &[String], jobs: usize) -> Vec<(String, bool
                     let Some(input) = inputs.get(i) else { return };
                     let r = std::process::Command::new(&exe)
                         .args(args)
-                        // chunks are already small; never split them again
-                        .env("PRINIA_MAX_INPUT", "0")
+                        // set directly, not through `max_input`: a project file would beat the env
+                        .env("PRINIA_CHILD", "1")
                         .stdin(std::process::Stdio::piped())
                         .stdout(std::process::Stdio::piped())
                         .stderr(std::process::Stdio::piped())
@@ -524,7 +538,11 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     }
 
     let max_input = cfg.num("max_input").unwrap_or(0) as usize;
-    if max_input > 0 && payload.chars().count() > max_input && !cli.cmd {
+    if max_input > 0
+        && payload.chars().count() > max_input
+        && !cli.cmd
+        && std::env::var_os("PRINIA_CHILD").is_none()
+    {
         return map_reduce(cli, &instruction, &payload, max_input);
     }
     if !stdin_tty && payload.trim().is_empty() {

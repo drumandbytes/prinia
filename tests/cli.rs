@@ -477,6 +477,69 @@ fn turns_from_a_private_provider_are_not_sent_to_another_one() {
 }
 
 #[test]
+fn long_input_is_split_once_even_when_a_project_sets_max_input() {
+    let mock = Mock::start("partial", 200);
+    let env = Env::new("max-input", &mock);
+    // a project file beats the environment, so the children must not rely on an env override
+    std::fs::write(env.dir.join("work/.priniarc"), "max_input = 40\n").unwrap();
+    let input = (0..6)
+        .map(|n| format!("line-{n}-aaaaaaaa\n"))
+        .collect::<String>(); // 96 characters
+    let (out, err, code) = env.run(&["-p", "local", "summarize this"], &input, &[]);
+    assert_eq!((out.as_str(), code), ("partial\n", 0), "{err}");
+    // three parts of at most 40 characters, then one combining call (itself over 40, never re-split)
+    assert_eq!(mock.hits(), 4, "{err}");
+    let last = mock.last().1.to_string();
+    assert!(
+        last.contains("--- part 1 ---") && last.contains("Combine them"),
+        "{last}"
+    );
+    assert!(
+        last.contains("summarize this"),
+        "the combining call carries the instruction"
+    );
+}
+
+#[test]
+fn trust_shows_the_file_asks_and_expires_when_the_file_changes() {
+    let mock = Mock::start("ok", 200);
+    let env = Env::new("trust", &mock);
+    let rc = env.dir.join("work/.priniarc");
+    std::fs::write(&rc, "run = true\n").unwrap();
+    let run_setting = |env: &Env| env.run(&["config"], "", &[]).0;
+    assert!(
+        !run_setting(&env)
+            .lines()
+            .any(|l| l.starts_with("run ") && l.contains("true"))
+    );
+    // no terminal and no --yes: nothing is trusted
+    let (out, err, code) = env.run(&["trust"], "", &[]);
+    assert!(
+        code != 0 && out.contains("run = true") && err.contains("--yes"),
+        "{out} {err}"
+    );
+    assert!(
+        !run_setting(&env)
+            .lines()
+            .any(|l| l.starts_with("run ") && l.contains("true"))
+    );
+    let (_, err, code) = env.run(&["trust", "--yes"], "", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        run_setting(&env)
+            .lines()
+            .any(|l| l.starts_with("run ") && l.contains("true"))
+    );
+    // any change to the file needs trusting again
+    std::fs::write(&rc, "run = true\nwrite = true\n").unwrap();
+    assert!(
+        !run_setting(&env)
+            .lines()
+            .any(|l| l.starts_with("run ") && l.contains("true"))
+    );
+}
+
+#[test]
 fn many_first_calls_at_once_share_one_key() {
     let mock = Mock::start("answer", 200);
     let env = Env::new("first-use-race", &mock);

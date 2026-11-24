@@ -99,28 +99,32 @@ fn is_trusted(text: &str) -> bool {
         .is_some_and(|t| t.lines().any(|l| l.trim() == digest(text)))
 }
 
-/// Trusts the exact current contents of every `.priniarc` above `cwd`; an edit revokes it.
-pub fn trust(cwd: &Path) -> std::io::Result<Vec<PathBuf>> {
+/// The `.priniarc` files above `cwd` as (path, contents, already trusted), nearest first.
+pub fn project_files(cwd: &Path) -> Vec<(PathBuf, String, bool)> {
+    cwd.ancestors()
+        .map(|d| d.join(".priniarc"))
+        .filter_map(|p| {
+            let text = fs::read_to_string(&p).ok()?;
+            let trusted = is_trusted(&text);
+            Some((p, text, trusted))
+        })
+        .collect()
+}
+
+/// Trusts the exact contents given; an edit to a file revokes it.
+pub fn trust(texts: &[&str]) -> std::io::Result<()> {
     let Some(tp) = trust_path() else {
-        return Ok(Vec::new());
+        return Ok(());
     };
     let mut known = fs::read_to_string(&tp).unwrap_or_default();
-    let mut done = Vec::new();
-    for p in cwd.ancestors().map(|d| d.join(".priniarc")) {
-        let Ok(text) = fs::read_to_string(&p) else {
-            continue;
-        };
-        if !is_trusted(&text) {
-            known.push_str(&digest(&text));
-            known.push('\n');
-        }
-        done.push(p);
+    for t in texts {
+        known.push_str(&digest(t));
+        known.push('\n');
     }
     if let Some(d) = tp.parent() {
         fs::create_dir_all(d)?;
     }
-    fs::write(tp, known)?;
-    Ok(done)
+    fs::write(tp, known)
 }
 
 #[derive(Clone, Copy, PartialEq)]
