@@ -306,22 +306,22 @@ mod tests {
         let root = std::env::temp_dir().join(format!("prinia-order-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let global = root.join("g.toml");
-        fs::write(&global, "max_tokens = 1\ncache_ttl = \"1d\"\n").unwrap();
-        fs::write(root.join(".priniarc"), "max_tokens = 2\n").unwrap();
+        fs::write(&global, "fast_under = 1\ncache_ttl = \"1d\"\n").unwrap();
+        fs::write(root.join(".priniarc"), "fast_under = 2\n").unwrap();
         // SAFETY: only this test touches these variables
         unsafe {
-            std::env::set_var("PRINIA_MAX_TOKENS", "3");
+            std::env::set_var("PRINIA_FAST_UNDER", "3");
             std::env::set_var("PRINIA_CACHE_TTL", "2d");
         }
         let c = Config::load_from(Some(global), &root);
-        assert_eq!(c.num("max_tokens"), Some(2), "directory beats env");
+        assert_eq!(c.num("fast_under"), Some(2), "directory beats env");
         assert_eq!(
             c.str("cache_ttl").as_deref(),
             Some("2d"),
             "env beats global"
         );
         unsafe {
-            std::env::remove_var("PRINIA_MAX_TOKENS");
+            std::env::remove_var("PRINIA_FAST_UNDER");
             std::env::remove_var("PRINIA_CACHE_TTL");
         }
         fs::remove_dir_all(&root).unwrap();
