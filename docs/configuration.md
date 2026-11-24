@@ -3,9 +3,11 @@
 Every setting can be given four ways. The first that applies wins:
 
 1. A **flag** (where one exists, such as `-m` or `--no-record`)
-2. An **environment variable**: `PRINIA_` plus the setting name in capitals, e.g. `PRINIA_MAX_TOKENS=2000`
-3. A **`.priniarc`** file in the current directory or a parent. Closer files win over farther ones
+2. A **`.priniarc`** file in the current directory or a parent. Closer files win over farther ones
+3. An **environment variable**: `PRINIA_` plus the setting name in capitals, e.g. `PRINIA_MAX_TOKENS=2000`
 4. The **global config**: `~/.config/prinia/config.toml` (`$XDG_CONFIG_HOME` is respected, on Windows `%APPDATA%\prinia`; `PRINIA_CONFIG` points at another file)
+
+A directory beats the environment on purpose: a project that says `record = false` or `run = false` keeps saying it, whatever your shell exports. Only a flag overrides it, for one call. This is safe because a project file can only set behaviour (below), never where your data goes.
 
 ```toml
 # ~/.config/prinia/config.toml, or .priniarc in a project
@@ -14,9 +16,43 @@ record = true
 cache_ttl = "3d"
 ```
 
-`prinia config` prints every setting, its effective value and its source (`env`, `config` or `default`), the files that were read and the configured providers. Unknown keys and values of the wrong type are reported on stderr and ignored, so a typo never silently changes behaviour. Booleans in environment variables accept `1/0`, `true/false`, `yes/no`, `on/off`.
+`prinia config` prints every setting, its effective value and its source (`directory`, `env`, `global` or `default`), the files that were read and the configured providers. Unknown keys and values of the wrong type are reported on stderr and ignored, so a typo never silently changes behaviour. Booleans in environment variables accept `1/0`, `true/false`, `yes/no`, `on/off`.
 
-A `.priniarc` is how a project gets its own behaviour: a repository that should never be recorded says `record = false`; one that must use a local model says `provider = "local"`.
+A `.priniarc` holds behaviour only: `record`, `cache`, `cache_ttl`, `context`, `context_chars`, `max_tokens`, `effort`, `fast_under`, `deep_over`, `check_retries`, `max_input`, `agent`, `agent_steps`, `run`, `write` and the two prompts. Everything about the device is read only from your global config and ignored, with a warning, in a project file: `[providers.*]`, `provider`, the model names, `keychain` and the history limits. A repository therefore cannot choose where your prompts go.
+
+Settings that let the model act on your machine or change what it is told (`run`, `write`, `agent`, `prompt_pipe`, `prompt_interactive`) are ignored in a project file until you run `prinia trust`, which prints each file and asks before trusting it (`--yes` skips the question). Turning `run`, `write` or `agent` off needs no trust. Trust is tied to the file's exact contents, so any later change, such as from a `git pull`, needs trusting again. Your own global config is always trusted.
+
+### Tags and private mode
+
+Providers can carry tags, and a project asks for a tag instead of naming a provider. The device decides which provider that means, so the same `.priniarc` works on every machine.
+
+```toml
+# ~/.config/prinia/config.toml
+provider = "local"
+
+[providers.local]
+type = "openai"
+base_url = "http://localhost:11434/v1"
+tags = ["private"]
+
+[providers.corp]               # a company key covered by an NDA
+type = "anthropic"
+api_key_env = "CORP_ANTHROPIC_KEY"
+tags = ["private", "work"]
+```
+
+```toml
+# .priniarc
+tag = "work"                   # use a provider tagged "work" (your default if it has the tag, else the first by name)
+```
+
+- `tag = "NAME"` (project or global setting) makes prinia use a provider with that tag. If none has it, the call fails; there is no fallback to another provider. `-p NAME` must name a provider with the tag, or it is refused before anything is sent.
+- `private` is a tag with shorthand: `private = true` on a provider means `tags = ["private"]`, and `private = true` as a setting requires that tag. It combines with `tag`, so a project can need both `work` and `private`.
+- Built-in `anthropic` and `openai` have no tags unless you define `[providers.anthropic]` with them.
+- Tags mean what you decide. prinia cannot check that a provider is covered by an agreement; marking it `private` is your statement that it is.
+- The check covers every call, including `history ask` and agent mode. `prinia init` tags the local model `private`.
+
+A `.priniarc` is how a project gets its own behaviour: a repository that should never be recorded says `record = false`, one that must never run commands says `run = false`.
 
 ## Providers
 
@@ -44,6 +80,8 @@ fast_model = "meta-llama/Llama-3.2-3B-Instruct-Turbo"
 | `base_url` | The API endpoint. Defaults to the official one for the type |
 | `api_key_env` | Environment variable holding the key. Defaults to `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`. Not needed for a local endpoint |
 | `model`, `fast_model`, `deep_model` | Models for the three tiers |
+| `tags` | Labels a project can ask for with the `tag` setting, e.g. `["private", "work"]` ([Tags and private mode](#tags-and-private-mode)) |
+| `private` | `true` is shorthand for the tag `private` |
 
 Without `-p` or `provider`, prinia uses the first of `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` that is set.
 
@@ -62,13 +100,24 @@ API keys are read from the environment and are never written to the history or t
 | `cache` | `pipe` | When identical calls are answered from history: `pipe`, `always`, `off` |
 | `context` | `0` | Earlier turns from this directory sent with every call; `-c` uses it, or 5 when unset |
 | `context_chars` | `16000` | Size cap for that context (characters; oldest turns are dropped first) |
+| `context_relevant` | `3` | Older turns matching the new question, sent in full (`0` = off; see [Context](usage.md#context)) |
+| `context_older` | `30` | Further older turns sent as one line each (`0` = off) |
+| `context_summary` | `false` | Add model-written summaries of older blocks of turns |
+| `context_blocks` | `4` | How many of those summaries |
 | `cache_ttl` | `7d` | How long a history entry can answer a call (`12h`, `3d`, `2w`, `1m`) |
 | `max_size` | `500m` | Size limit for the history's stored content (`100k`, `500m`, `2g`); the oldest turns go first |
 | `max_age` | none | Also drop turns older than this (`90d`, `52w`) |
 | `fast_under` | `0` (off) | Calls with fewer characters than this use the fast tier unless a tier or model is given |
 | `deep_over` | none | Calls with more characters than this use the deep tier unless a tier or model is given |
-| `history_scan` | `200` | Newest turns that `history ask` and `history agent` read |
-| `excerpt_prompt` / `excerpt_reply` | `200` / `400` | Characters of each prompt and answer sent for `history ask` and `history agent` |
+| `history_scan` | `200` | Newest turns that `history agent` reads |
+| `ask_turns` | `15` | Best-matching turns `history ask` sends to the model |
+| `excerpt_prompt` / `excerpt_reply` | `200` / `400` (`history ask`: `400` / `1000`) | Characters of each prompt and answer sent for `history ask` and `history agent` |
+| `max_input` | `0` (off) | Longer stdin is processed in parts and combined ([Long input](usage.md#long-input)) |
+| `private` | `false` | Only use providers tagged `private` ([Tags and private mode](#tags-and-private-mode)) |
+| `tag` | none | Only use a provider with this tag |
+| `agent` | `false` | Agent mode for every call at a terminal ([Agent](agent.md)) |
+| `run` / `write` | `false` | Let agent mode run commands / change files |
+| `agent_steps` | `25` | Tool rounds before an agent session stops |
 | `check_retries` | `2` | Extra attempts when an answer fails `--json` or `--check` |
 | `keychain` | `false` | Keep the history key in the OS credential store instead of a file ([History](history.md#where-the-key-lives)) |
 | `prompt_pipe`, `prompt_interactive` | see below | The system prompts |
@@ -93,3 +142,5 @@ prinia sends one of these as the system prompt, depending on whether input or ou
 | :--- | :--- |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (or the variable named by `api_key_env`) | Provider credentials |
 | `PRINIA_CONFIG` | Path of the global config file |
+| `PRINIA_WIDGET_KEY` | Keys for the zsh widget, space-separated (default `^g`); set before `eval "$(prinia shell zsh)"` |
+| `PRINIA_OLLAMA_URL` | Where `prinia init` looks for Ollama (default `http://localhost:11434`) |

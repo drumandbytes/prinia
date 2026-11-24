@@ -131,6 +131,29 @@ pub fn read_stats(dir: Option<&str>, since_days: Option<i64>) -> Result<Stats> {
     )?)
 }
 
+/// The data key from an unfinished rotation, if `master` unlocks it.
+fn pending_key(conn: &Connection, master: &Key) -> Option<Vec<u8>> {
+    let w: Vec<u8> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'data_key_pending'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .ok()??;
+    unseal(master, &w).ok()
+}
+
+fn promote_pending(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE meta SET value = (SELECT value FROM meta WHERE key = 'data_key_pending') WHERE key = 'data_key'",
+        [],
+    )?;
+    tx.execute("DELETE FROM meta WHERE key = 'data_key_pending'", [])?;
+    Ok(tx.commit()?)
+}
+
 fn pack(key: &Key, c: &Content) -> Result<Vec<u8>> {
     let v = json!({"i": c.instruction, "p": c.payload, "r": c.response, "cwd": c.cwd, "repo": c.repo, "branch": c.branch});
     seal(key, &zstd::encode_all(v.to_string().as_bytes(), 3)?)
@@ -160,6 +183,8 @@ impl Store {
     pub fn open_at(path: &Path, keychain: bool) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        // parallel prinia processes (`--each`, shell prompts) share this file
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version > SCHEMA_VERSION {
             bail!("the history was written by a newer version of prinia (schema {version})");
@@ -191,24 +216,28 @@ impl Store {
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (day, dir)
              );
+             CREATE TABLE IF NOT EXISTS summaries (
+                key TEXT PRIMARY KEY,
+                content BLOB NOT NULL
+             );
              PRAGMA user_version = {SCHEMA_VERSION};"
         ))?;
 
-        let wrapped: Option<Vec<u8>> = conn
-            .query_row("SELECT value FROM meta WHERE key = 'data_key'", [], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        let data_key = match (wrapped, key::load(keychain)?) {
-            (Some(w), Some(master)) => unseal(&master, &w)
-                .context("the key does not match this history")?
-                .try_into()
-                .map_err(|_| anyhow!("corrupt data key"))?,
-            (Some(_), None) => bail!(
-                "the history exists but its key is missing; restore it with `prinia key import`"
-            ),
-            (None, master) => {
-                let master = match master {
+        let read_wrapped = || -> Result<Option<Vec<u8>>> {
+            Ok(conn
+                .query_row("SELECT value FROM meta WHERE key = 'data_key'", [], |r| {
+                    r.get(0)
+                })
+                .optional()?)
+        };
+        let mut wrapped = read_wrapped()?;
+        if wrapped.is_none() {
+            // First use. Take the write lock before creating any key, so two processes starting
+            // at once cannot each make their own master key and lock each other out.
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+            wrapped = read_wrapped()?;
+            if wrapped.is_none() {
+                let master = match key::load(keychain)? {
                     Some(m) => m,
                     None => {
                         let m = key::random()?;
@@ -221,32 +250,49 @@ impl Store {
                     "INSERT INTO meta (key, value) VALUES ('data_key', ?1)",
                     params![seal(&master, &dk)?],
                 )?;
-                dk
+                conn.execute_batch("COMMIT")?;
+                return Ok(Store { conn, data_key: dk });
             }
+            conn.execute_batch("COMMIT")?;
+        }
+        let data_key = match (wrapped, key::load(keychain)?) {
+            (Some(w), Some(master)) => {
+                let dk = match unseal(&master, &w) {
+                    Ok(k) => k,
+                    // `key rotate` saved the new key file but stopped before the database caught up
+                    Err(e) => match pending_key(&conn, &master) {
+                        Some(k) => {
+                            promote_pending(&conn)?;
+                            k
+                        }
+                        None => return Err(e).context("the key does not match this history"),
+                    },
+                };
+                dk.try_into().map_err(|_| anyhow!("corrupt data key"))?
+            }
+            (Some(_), None) => bail!(
+                "the history exists but its key is missing; restore it with `prinia key import`"
+            ),
+            (None, _) => bail!("the history has no data key"),
         };
         Ok(Store { conn, data_key })
     }
 
     /// Re-wrap the data key under a new master key. The history itself is not rewritten.
-    // NOTE: the database is updated before the key is saved; if saving fails the old wrapping is restored.
+    /// Crash-safe in three steps: the new wrapping is stored beside the old, then the key is
+    /// saved, then the new wrapping replaces the old. `open_at` finishes it if the process stopped
+    /// between the last two.
     pub fn rewrap(&self, new_master: &Key, keychain: bool) -> Result<()> {
-        let old: Vec<u8> =
-            self.conn
-                .query_row("SELECT value FROM meta WHERE key = 'data_key'", [], |r| {
-                    r.get(0)
-                })?;
         self.conn.execute(
-            "UPDATE meta SET value = ?1 WHERE key = 'data_key'",
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('data_key_pending', ?1)",
             params![seal(new_master, &self.data_key)?],
         )?;
         if let Err(e) = key::save(new_master, keychain) {
-            self.conn.execute(
-                "UPDATE meta SET value = ?1 WHERE key = 'data_key'",
-                params![old],
-            )?;
+            self.conn
+                .execute("DELETE FROM meta WHERE key = 'data_key_pending'", [])?;
             return Err(e);
         }
-        Ok(())
+        promote_pending(&self.conn)
     }
 
     /// Whether `master` unlocks the history at `path` (used before importing a key).
@@ -261,7 +307,8 @@ impl Store {
             })
             .optional()
             .unwrap_or(None);
-        Ok(wrapped.is_none_or(|w| unseal(master, &w).is_ok()))
+        Ok(wrapped.is_none_or(|w| unseal(master, &w).is_ok())
+            || pending_key(&conn, master).is_some())
     }
 
     /// A keyed hash, so the stored value reveals nothing about the prompt it stands for.
@@ -389,13 +436,92 @@ impl Store {
         Ok(())
     }
 
+    /// A stored summary of a block of turns (see `context`), keyed by the exact turns it covers.
+    pub fn summary_get(&self, key: &str) -> Result<Option<String>> {
+        let blob: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT content FROM summaries WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        blob.map(|b| Ok(String::from_utf8_lossy(&unseal(&self.data_key, &b)?).into_owned()))
+            .transpose()
+    }
+
+    pub fn summary_put(&self, key: &str, text: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO summaries (key, content) VALUES (?1, ?2)",
+            params![key, seal(&self.data_key, text.as_bytes())?],
+        )?;
+        Ok(())
+    }
+
     pub fn delete(&self, ids: &[i64]) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
+        // a summary may contain what was just deleted; they are rebuilt on demand
+        tx.execute("DELETE FROM summaries", [])?;
         let mut n = 0;
         for id in ids {
             n += tx.execute("DELETE FROM turns WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotation_survives_a_crash_after_the_key_file_was_replaced() {
+        let d = std::env::temp_dir().join(format!("prinia-rot-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("cfg")).unwrap();
+        // SAFETY: no other test reads the config location while this one runs a store
+        unsafe { std::env::set_var("PRINIA_CONFIG", d.join("cfg/config.toml")) };
+        let db = d.join("h.db");
+        let s = Store::open_at(&db, false).unwrap();
+        let meta = Meta {
+            dir: "d",
+            provider: "p",
+            model: "m",
+            mode: "pipe",
+            tier: "t",
+            input_tokens: 1,
+            output_tokens: 1,
+            duration_ms: 1,
+            cache_key: "k",
+        };
+        let content = Content {
+            response: "kept".into(),
+            ..Default::default()
+        };
+        s.record(&meta, &content).unwrap();
+        // the crash: new key saved and its wrapping stored, but `data_key` still the old one
+        let new = key::random().unwrap();
+        s.conn
+            .execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('data_key_pending', ?1)",
+                params![seal(&new, &s.data_key).unwrap()],
+            )
+            .unwrap();
+        key::save(&new, false).unwrap();
+        drop(s);
+        let s = Store::open_at(&db, false).unwrap();
+        assert_eq!(s.get(1).unwrap().unwrap().content.response, "kept");
+        let pending: Option<Vec<u8>> = s
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'data_key_pending'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(pending.is_none(), "the rotation was finished");
+        drop(s); // Windows will not delete a file that is still open
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

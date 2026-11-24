@@ -55,9 +55,59 @@ prinia "what does SIGPIPE do?"
 prinia -c "and how do I ignore it in Rust?"
 ```
 
-The context comes from your own history, not from a provider's session, so it works with any provider and survives a switch of model. Only turns from the current directory are used, oldest first, and long turns are cut. Set `context = 5` (a number of turns) to include it on every call and `--no-context` to leave it out once. `context_chars` (default 16000) caps its size; the oldest turns are dropped first. Calls made with `--no-record` are not in the history, so they are never part of a context.
+Turns made with a provider tagged `private` are never sent to a provider that is not (see [Tags and private mode](configuration.md#tags-and-private-mode)). The context comes from your own history, not from a provider's session, so it works with any provider and survives a switch of model. Only turns from the current directory are used, oldest first, and long turns are cut. Set `context = 5` (a number of turns) to include it on every call and `--no-context` to leave it out once. `context_chars` (default 16000) caps its size; the oldest turns are dropped first. Calls made with `--no-record` are not in the history, so they are never part of a context.
+
+Older turns are not simply dropped. The context has four tiers:
+
+1. **Recent turns, word for word**: the newest `context` turns.
+2. **Relevant older turns, in full**: up to `context_relevant` turns (default 3; `0` turns it off) from further back that match the words of your new question (prompt matches count most; a word that is in most of your turns is ignored). They use up to half of `context_chars`. Only the newest 300 turns of the directory are searched. This is what lets `prinia -c "why did the payments API time out again?"` find the exchange from three weeks ago.
+3. **Older questions, one line each**: the next `context_older` turns (default 30; `0` turns it off), cut to 160 characters, so the model knows what you were working on.
+4. **Summaries** (opt-in, `context_summary = true`): older turns are grouped into blocks of about 25 history entries, and each finished block is summarized once by the fast tier of the *same provider as the call*, so `private` and `tag` rules hold. Only the newest `context_blocks` blocks (default 4) are included. A summary is stored encrypted next to the history and is derived from it: any delete (`history rm`, size or age limits) drops all stored summaries, and they are rebuilt from what is left. Summaries are lossy; the model can be wrong about details it never saw in full.
+
+`prinia context [QUESTION]` prints exactly what `-c` would send for this directory (give it the question to see which older turns it would pull in), so nothing about it is hidden. `prinia context --summarize` builds and stores the summaries now (tier 3) instead of at the first `-c` call that needs them. Starting a call with `-c` is how you use it: `prinia -c "continue the API retry work from earlier"`.
 
 A call with context is cached separately from the same question without it.
+
+## Long input
+
+Models have a context limit. Set `max_input` (characters, `0` = off, which is the default) and prinia handles longer stdin in two steps: it runs your instruction on each part separately (in parallel, `-j` at a time, cut at line ends), then asks once more to combine the partial answers.
+
+```bash
+prinia init                                   # sets max_input = 48000 for a local model
+cat huge.log | PRINIA_MAX_INPUT=40000 prinia "what went wrong, in 5 bullets?"
+```
+
+This works for summaries and extraction. It does not work for questions that need the whole text at once, such as counting across parts or comparing the first line with the last: each part is answered blind to the others, and a small model's combined answer to those can be wrong. `max_input` is a project setting too.
+
+## One call per line
+
+```bash
+cat urls.txt | prinia --each "one-line summary of the page at this URL"
+git ls-files '*.py' | prinia --each -j 8 "does this file name suggest a test? answer yes or no"
+```
+
+`--each` makes a separate call for every non-empty stdin line, `-j N` at a time (default 4), and prints the answers in input order, one per line. Each call is cached and recorded like any other, so rerunning a half-finished batch only asks for what is missing. A failed line prints an empty answer, reports the reason on stderr, and the exit code is non-zero. Ask for one-line answers; a multi-line answer breaks the one-answer-per-line pairing.
+
+## Templates
+
+Save an instruction you reuse as a file, then call it by name:
+
+```bash
+mkdir -p .prinia/templates
+echo "Write a one-line conventional commit message for this diff." > .prinia/templates/commit
+git diff | prinia -t commit | pbcopy
+git diff | prinia -t commit "mention the ticket ABC-12"   # extra words are added after the template
+```
+
+`prinia -t NAME` looks for `.prinia/templates/NAME` in the current directory and its parents (so a repository can ship its own), then `templates/NAME` next to your global config. A template is plain text; it is the instruction, nothing more, so it cannot change settings.
+
+## From the shell prompt (zsh)
+
+```bash
+eval "$(prinia shell zsh)"     # add to ~/.zshrc
+```
+
+Type what you want in plain words and press ctrl-g. It is bound in emacs mode and in both vi modes. Set `PRINIA_WIDGET_KEY` before the `eval` line to change it, or to use several keys: `export PRINIA_WIDGET_KEY='^x^p ^n'` (zsh key notation; `^g` is ctrl-g). To free ctrl-g again, rebind it after the `eval`: `bindkey '^g' list-expand`. The line is replaced by one shell command, which you can edit; nothing runs until you press enter. The model is told your shell and OS and which of `rg`, `fd`, `jq` and `yq` are installed. `prinia --cmd "..."` does the same without the widget. Answers from small local models can be wrong, so read the command before running it.
 
 ## Checking the answer
 
@@ -95,9 +145,19 @@ Every successful call is saved to the [history](history.md) after its output has
 | `--check COMMAND` | Require the command to accept the answer on stdin; retry if not |
 | `--no-cache` | Skip the history cache |
 | `--record` / `--no-record` | Save or don't save this call |
+| `-t`, `--template NAME` | Use a saved instruction ([Templates](#templates)) |
+| `--each`, `-j N` | One call per stdin line, N at a time ([One call per line](#one-call-per-line)) |
+| `--cmd` | Answer with one shell command (what the zsh widget uses) |
+| `-a`, `--agent` / `-x`, `--do` | Agent mode / agent mode that may run commands ([Agent](agent.md)) |
+| `--write`, `--run`, `-y`, `--no-agent` | Agent permissions, skip the command question, turn the `agent` setting off once |
 
 | Command | |
 | :--- | :--- |
 | `prinia config` | Show every setting and where its value comes from |
+| `prinia update [--check]` | Update prinia to the latest release ([Install](install.md#updating)) |
+| `prinia init` | Find Ollama, pick a model for this machine, write the config |
+| `prinia trust` | Review and trust this project's `.priniarc` ([Configuration](configuration.md)) |
+| `prinia context [QUESTION]` | Show what `-c` would send; `--summarize` builds summaries now |
+| `prinia shell zsh` | The zsh widget, for `eval` in `~/.zshrc` |
 | `prinia history` | Browse, `show`, `rm` ([History](history.md)) |
 | `prinia key` | `show`, `import`, `rotate` ([History](history.md#the-key)) |

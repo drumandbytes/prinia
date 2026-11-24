@@ -2,7 +2,7 @@
 //! store with `keychain = true`). It wraps the data key that encrypts history content, so it can
 //! be rotated without rewriting the history, and it can be shown as words for backup.
 use crate::config;
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::{fs, io::Write};
 
@@ -59,7 +59,7 @@ fn read_file(path: &Path) -> Result<Option<String>> {
     };
     #[cfg(unix)]
     if std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o077 != 0 {
-        bail!(
+        anyhow::bail!(
             "{} is readable by others; run: chmod 600 {}",
             path.display(),
             path.display()

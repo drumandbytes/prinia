@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use config::Config;
-use provider::{Provider, Request, Tier};
+use provider::{Provider, Reply, Request, Tier};
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio, exit};
@@ -14,11 +14,15 @@ mod config;
 mod context;
 mod curate;
 mod history;
+mod init;
 mod key;
 mod keychain;
 mod provider;
+mod retrieve;
+mod sh;
 mod stats;
 mod store;
+mod update;
 
 const PROMPT_PIPE: &str = "You are a command-line tool in a UNIX pipeline. Output ONLY the raw text or data requested. No markdown, no code fences, no greetings, no commentary.";
 const PROMPT_INTERACTIVE: &str = "You are an inline terminal companion. Answer directly, no pleasantries. Keep it under 15 lines unless asked for more. Prefer commands, snippets and paths over background.";
@@ -61,13 +65,41 @@ struct Cli {
     #[arg(short = 'a', long)]
     agent: bool,
 
+    /// Shorthand for --agent --run: let the model run commands to answer
+    #[arg(short = 'x', long = "do", conflicts_with = "no_agent")]
+    do_it: bool,
+
     /// With --agent: allow creating and editing files
-    #[arg(long, requires = "agent")]
+    #[arg(long)]
     write: bool,
 
     /// With --agent: allow running shell commands
-    #[arg(long, requires = "agent")]
+    #[arg(long)]
     run: bool,
+
+    /// With --run / -x: run every command without asking (read-only ones never ask)
+    #[arg(short = 'y', long)]
+    yes: bool,
+
+    /// Use a saved instruction: `.prinia/templates/NAME` here or above, or `templates/NAME` in the config directory
+    #[arg(short = 't', long, value_name = "NAME")]
+    template: Option<String>,
+
+    /// Run the instruction once per line of stdin, in parallel; answers are printed in input order
+    #[arg(long, conflicts_with_all = ["agent", "do_it", "cmd"])]
+    each: bool,
+
+    /// With --each: how many calls run at once
+    #[arg(short = 'j', long, default_value_t = 4, value_parser = clap::value_parser!(u32).range(1..=64))]
+    jobs: u32,
+
+    /// Answer with one shell command and nothing else (what the shell widget uses)
+    #[arg(long, conflicts_with_all = ["agent", "do_it", "json", "check"])]
+    cmd: bool,
+
+    /// Don't use agent mode, even if the `agent` setting is on
+    #[arg(long, conflicts_with = "agent")]
+    no_agent: bool,
 
     /// Require the answer to be valid JSON; ask again if it is not
     #[arg(long, conflicts_with = "agent")]
@@ -118,6 +150,33 @@ enum Cmd {
         /// Template: {calls} {cache_hits} {hit_rate} {input_tokens} {output_tokens} {tokens}
         #[arg(long)]
         format: Option<String>,
+    },
+    /// Show the context `-c` would send for this directory; `--summarize` builds the summaries first
+    Context {
+        /// A question: shows which older turns it would pull in
+        question: Option<String>,
+        /// Build and store summaries of older turns now (uses the fast tier of your provider)
+        #[arg(long)]
+        summarize: bool,
+    },
+    /// Update prinia to the latest release (not for Homebrew or cargo installs)
+    Update {
+        /// Only say whether a newer release exists
+        #[arg(long)]
+        check: bool,
+    },
+    /// Find a local model server, pick a model for this machine and write the config
+    Init,
+    /// Print the shell integration to load: `eval "$(prinia shell zsh)"`
+    Shell {
+        #[arg(value_parser = ["zsh"])]
+        shell: String,
+    },
+    /// Show the `.priniarc` files here and above, and allow them to turn on `run`, `write` and `agent`
+    Trust {
+        /// Skip the question
+        #[arg(long)]
+        yes: bool,
     },
     /// Back up, restore or rotate the key that protects the history
     Key {
@@ -192,6 +251,69 @@ fn run() -> Result<()> {
     let keychain = cfg.bool("keychain").unwrap_or(false);
     match &cli.command {
         Some(Cmd::Config) => show_config(&cfg),
+        Some(Cmd::Context {
+            question,
+            summarize,
+        }) => {
+            let provider = Provider::resolve(&cfg, cli.provider.as_deref())?;
+            let model = provider.model(&cfg, Tier::Fast)?;
+            let store = Store::open(keychain)?;
+            let dir = store::dir_hash(&std::env::current_dir()?);
+            let on = *summarize || cfg.bool("context_summary") == Some(true);
+            let msgs = context::build(
+                &store,
+                &context::Params {
+                    dir: &dir,
+                    verbatim: match cfg.num("context").unwrap_or(0) {
+                        0 => 5,
+                        n => n as usize,
+                    },
+                    budget: cfg.num("context_chars").unwrap_or(16_000) as usize,
+                    older: cfg.num("context_older").unwrap_or(30) as usize,
+                    query: question.as_deref().unwrap_or(""),
+                    relevant: cfg.num("context_relevant").unwrap_or(3) as usize,
+                    visible: &|t| provider.may_see(&cfg, &t.provider),
+                    summary: on.then(|| context::Summary {
+                        provider: &provider,
+                        model: &model,
+                        blocks: cfg.num("context_blocks").unwrap_or(4) as usize,
+                    }),
+                },
+            )?;
+            if msgs.is_empty() {
+                println!("no history in this directory yet");
+            }
+            for (user, assistant) in msgs {
+                println!("[you]\n{user}\n[model]\n{assistant}\n");
+            }
+            Ok(())
+        }
+        Some(Cmd::Update { check }) => update::run(*check),
+        Some(Cmd::Init) => init::run(),
+        Some(Cmd::Shell { .. }) => {
+            print!("{}", include_str!("../scripts/prinia.zsh"));
+            Ok(())
+        }
+        Some(Cmd::Trust { yes }) => {
+            let files = config::project_files(&std::env::current_dir()?);
+            if files.is_empty() {
+                bail!("no .priniarc here or above");
+            }
+            let pending: Vec<_> = files.iter().filter(|f| !f.2).collect();
+            if pending.is_empty() {
+                println!("already trusted");
+                return Ok(());
+            }
+            for (p, text, _) in &pending {
+                println!("--- {} ---\n{}", p.display(), text.trim_end());
+            }
+            if !history::confirm("Trust these files exactly as shown?", *yes)? {
+                bail!("not trusted");
+            }
+            config::trust(&pending.iter().map(|f| f.1.as_str()).collect::<Vec<_>>())?;
+            println!("trusted {} file(s)", pending.len());
+            Ok(())
+        }
         Some(Cmd::Key { action }) => key_cmd(action, keychain),
         Some(Cmd::Stats {
             here,
@@ -232,47 +354,216 @@ fn run() -> Result<()> {
             action: Some(HistoryCmd::Clean { yes }),
             ..
         }) => history::clean(&Store::open(keychain)?, &cfg, *yes),
+        None if cli.each => each(&cli),
         None => ask(&cli, &cfg, keychain),
     }
 }
 
-fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
-    let stdin_tty = std::io::stdin().is_terminal();
-    let stdout_tty = std::io::stdout().is_terminal();
+/// The command line without the flags that only drive batching.
+fn child_args() -> Vec<String> {
+    let mut args = Vec::new();
+    let mut raw = std::env::args().skip(1);
+    while let Some(a) = raw.next() {
+        match a.as_str() {
+            "--each" => {}
+            "-j" | "--jobs" => {
+                raw.next();
+            }
+            _ if a.starts_with("--jobs=") => {}
+            _ => args.push(a),
+        }
+    }
+    args
+}
+
+/// One child `prinia` per input, `jobs` at a time, so caching, recording, checks and errors behave
+/// exactly as for a single call. Results come back in input order as (text, succeeded).
+fn fan_out(args: &[String], inputs: &[String], jobs: usize) -> Vec<(String, bool)> {
+    let Ok(exe) = std::env::current_exe() else {
+        return vec![("cannot find the prinia binary".into(), false); inputs.len()];
+    };
+    let results = std::sync::Mutex::new(vec![(String::new(), false); inputs.len()]);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..jobs.min(inputs.len()) {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(input) = inputs.get(i) else { return };
+                    let r = std::process::Command::new(&exe)
+                        .args(args)
+                        // set directly, not through `max_input`: a project file would beat the env
+                        .env("PRINIA_CHILD", "1")
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .spawn()
+                        .and_then(|mut c| {
+                            let _ = c.stdin.take().map(|mut p| p.write_all(input.as_bytes()));
+                            c.wait_with_output()
+                        });
+                    let r = match r {
+                        Ok(o) if o.status.success() => (
+                            String::from_utf8_lossy(&o.stdout).trim_end().to_string(),
+                            true,
+                        ),
+                        Ok(o) => (String::from_utf8_lossy(&o.stderr).trim().to_string(), false),
+                        Err(e) => (e.to_string(), false),
+                    };
+                    results.lock().unwrap()[i] = r;
+                    let n = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    eprintln!("[prinia] {n}/{}", inputs.len());
+                }
+            });
+        }
+    });
+    results.into_inner().unwrap()
+}
+
+fn each(cli: &Cli) -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let lines: Vec<String> = input
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    let mut failed = 0;
+    for (i, (text, ok)) in fan_out(&child_args(), &lines, cli.jobs as usize)
+        .into_iter()
+        .enumerate()
+    {
+        if ok {
+            let _ = writeln!(std::io::stdout(), "{text}");
+        } else {
+            failed += 1;
+            eprintln!("[prinia] line {} failed: {text}", i + 1);
+            let _ = writeln!(std::io::stdout());
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} of {} lines failed", lines.len());
+    }
+    Ok(())
+}
+
+/// Pieces of at most `max` characters, cut at line ends where possible.
+fn chunks(text: &str, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for line in text.split_inclusive('\n') {
+        let mut rest = line;
+        while cur.chars().count() + rest.chars().count() > max {
+            let room = max - cur.chars().count();
+            if room == 0 {
+                out.push(std::mem::take(&mut cur));
+                continue;
+            }
+            // a single over-long line is cut mid-line
+            let cut = rest.char_indices().nth(room).map_or(rest.len(), |(i, _)| i);
+            if cur.is_empty() {
+                out.push(rest[..cut].to_string());
+                rest = &rest[cut..];
+            } else {
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push_str(rest);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Input over `max_input` characters: run the instruction on each piece, then once more over the
+/// partial answers.
+fn map_reduce(cli: &Cli, instruction: &str, payload: &str, max: usize) -> Result<()> {
+    let pieces = chunks(payload, max);
+    eprintln!(
+        "[prinia] input is {} characters; processing it in {} parts",
+        payload.chars().count(),
+        pieces.len()
+    );
+    let partial = fan_out(&child_args(), &pieces, cli.jobs as usize);
+    if let Some(i) = partial.iter().position(|(_, ok)| !ok) {
+        bail!("part {} failed: {}", i + 1, partial[i].0);
+    }
+    let joined = partial
+        .iter()
+        .enumerate()
+        .map(|(i, (t, _))| format!("--- part {} ---\n{t}", i + 1))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let final_instruction = format!(
+        "The input was too long, so the instruction below was applied to consecutive parts of it separately; the results are given as the input. Combine them into one final answer to the instruction, without mentioning the parts.\n\nInstruction: {instruction}"
+    );
+    let mut args = child_args();
+    // the final call carries the full instruction itself, so drop the template and the original one
+    let mut skip = false;
+    args.retain(|a| {
+        if skip {
+            skip = false;
+            return false;
+        }
+        match a.as_str() {
+            "-t" | "--template" => {
+                skip = true;
+                false
+            }
+            _ if a.starts_with("--template=") => false,
+            _ => cli.prompt.as_deref() != Some(a.as_str()),
+        }
+    });
+    args.push(final_instruction);
+    let (text, ok) = fan_out(&args, &[joined], 1).remove(0);
+    if !ok {
+        bail!("{text}");
+    }
+    println!("{text}");
+    Ok(())
+}
+
+/// The instruction (with any template) and the piped input.
+fn read_input(cli: &Cli, stdin_tty: bool) -> Result<(String, String)> {
     let mut payload = String::new();
     if !stdin_tty {
         std::io::stdin().read_to_string(&mut payload)?;
     }
-    let instruction = cli.prompt.clone().unwrap_or_default();
+    let mut instruction = cli.prompt.clone().unwrap_or_default();
+    if let Some(name) = &cli.template {
+        let t = config::template(name, &std::env::current_dir()?)?;
+        instruction = if instruction.is_empty() {
+            t
+        } else {
+            format!("{t}\n\n{instruction}")
+        };
+    }
     if instruction.is_empty() && payload.trim().is_empty() {
         bail!("nothing to do. Usage: prinia \"question\"   or   cmd | prinia \"instruction\"");
     }
+    Ok((instruction, payload))
+}
 
-    // Raw output whenever either end is a pipe.
-    let piped = !stdin_tty || !stdout_tty;
-    let mode = if cli.agent {
-        "agent"
+fn system_prompt(cli: &Cli, cfg: &Config, piped: bool) -> String {
+    let system = if cli.cmd {
+        cmd_prompt()
     } else if piped {
-        "pipe"
-    } else {
-        "interactive"
-    };
-    let system = if piped {
         cfg.str("prompt_pipe").unwrap_or_else(|| PROMPT_PIPE.into())
     } else {
         cfg.str("prompt_interactive")
             .unwrap_or_else(|| PROMPT_INTERACTIVE.into())
     };
-
-    let validate = cli.json || cli.check.is_some();
-    let system = if cli.json {
+    if cli.json {
         format!("{system} Respond with a single valid JSON value and nothing else.")
     } else {
         system
-    };
+    }
+}
 
-    let provider = Provider::resolve(cfg, cli.provider.as_deref())?;
-    let size = combine(&instruction, &payload).chars().count() as u64;
+/// The tier (a flag, else the size rules) and the model for it.
+fn route(cli: &Cli, cfg: &Config, provider: &Provider, size: u64) -> Result<(Tier, String)> {
     let tier = if cli.fast {
         Tier::Fast
     } else if cli.deep {
@@ -290,9 +581,174 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
         Some(m) => m.clone(),
         None => provider.model(cfg, tier)?,
     };
+    Ok((tier, model))
+}
+
+/// How many earlier turns this call sends (`-c`, `--no-context`, the `context` setting).
+fn context_turns(cli: &Cli, cfg: &Config) -> usize {
+    let setting = cfg.num("context").unwrap_or(0) as usize;
+    if cli.no_context {
+        0
+    } else if cli.context {
+        if setting > 0 { setting } else { 5 }
+    } else {
+        setting
+    }
+}
+
+/// One model call (or an agent run), retried while a `--json` / `--check` validation fails.
+struct Call<'a> {
+    cli: &'a Cli,
+    cfg: &'a Config,
+    provider: &'a Provider,
+    req: Request<'a>,
+    agent: bool,
+    piped: bool,
+}
+
+impl Call<'_> {
+    fn run(&self) -> Result<(Reply, String)> {
+        let (cli, cfg) = (self.cli, self.cfg);
+        let validate = cli.json || cli.check.is_some();
+        // A terminal gets the answer as it arrives; a pipe gets it whole, so a wrapping code fence
+        // can be stripped. NOTE: filter the fence while streaming if piped latency ever matters.
+        let piped = self.piped;
+        let mut show = |piece: &str| {
+            if !piped && !validate {
+                print!("{piece}");
+                let _ = std::io::stdout().flush();
+            }
+        };
+        // Checks need the whole answer, so nothing is printed (or saved) until it passes.
+        let attempts = if validate {
+            cfg.num("check_retries").unwrap_or(2) + 1
+        } else {
+            1
+        };
+        let mut tried = 0;
+        loop {
+            tried += 1;
+            let reply = if self.agent {
+                agent::run(
+                    &agent::Opts {
+                        cfg,
+                        provider: self.provider,
+                        model: self.req.model,
+                        effort: self.req.effort,
+                        max_tokens: self.req.max_tokens,
+                        user: self.req.user,
+                        write: cli.write || cfg.bool("write").unwrap_or(false),
+                        run: cli.run || cli.do_it || cfg.bool("run").unwrap_or(false),
+                        yes: cli.yes,
+                    },
+                    &mut show,
+                )?
+            } else {
+                self.provider.complete(&self.req, &mut show)?
+            };
+            if reply.stop == "refusal" {
+                bail!("the model declined this request");
+            }
+            let text = if piped || validate {
+                strip_fence(&reply.text)
+            } else {
+                reply.text.clone()
+            };
+            if !validate || check::passes(&text, cli.json, cli.check.as_deref()) {
+                return Ok((reply, text));
+            }
+            if tried >= attempts {
+                bail!("the answer failed the check {tried} time(s); nothing was printed or saved");
+            }
+            eprintln!("[prinia] the answer failed the check; asking again ({tried}/{attempts})");
+        }
+    }
+}
+
+/// Everything `record_turn` saves besides the answer.
+struct Recorded<'a> {
+    dir: &'a str,
+    cwd: &'a Path,
+    provider: &'a Provider,
+    mode: &'a str,
+    tier: &'a str,
+    cache_key: &'a str,
+    started: Instant,
+    instruction: String,
+    payload: String,
+}
+
+/// Bookkeeping happens after the output is out, so nothing downstream waits for it.
+fn record_turn(s: &Store, cfg: &Config, r: Recorded, reply: &Reply, text: String) {
+    let cut_off = matches!(reply.stop.as_str(), "max_tokens" | "length");
+    let (repo, branch) = git_info(r.cwd);
+    let meta = Meta {
+        dir: r.dir,
+        provider: &r.provider.name,
+        model: &reply.model,
+        mode: r.mode,
+        tier: r.tier,
+        input_tokens: reply.input_tokens,
+        output_tokens: reply.output_tokens,
+        duration_ms: r.started.elapsed().as_millis() as u64,
+        // an answer cut off at the limit stays in the history but never answers a later call
+        cache_key: if cut_off { "" } else { r.cache_key },
+    };
+    let content = Content {
+        instruction: r.instruction,
+        payload: r.payload,
+        response: text,
+        cwd: r.cwd.to_string_lossy().into_owned(),
+        repo,
+        branch,
+    };
+    if let Err(e) = s.record(&meta, &content) {
+        eprintln!("[prinia] history not saved: {e:#}");
+    } else {
+        history::enforce_limits(s, cfg);
+    }
+}
+
+fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
+    let stdin_tty = std::io::stdin().is_terminal();
+    let (instruction, payload) = read_input(cli, stdin_tty)?;
+
+    let max_input = cfg.num("max_input").unwrap_or(0) as usize;
+    if max_input > 0
+        && payload.chars().count() > max_input
+        && !cli.cmd
+        && std::env::var_os("PRINIA_CHILD").is_none()
+    {
+        return map_reduce(cli, &instruction, &payload, max_input);
+    }
+    if !stdin_tty && payload.trim().is_empty() {
+        eprintln!("prinia: warning: stdin is empty, answering the instruction alone");
+    }
+
+    // Raw output whenever either end is a pipe.
+    let piped = !stdin_tty || !std::io::stdout().is_terminal() || cli.cmd;
+    let validate = cli.json || cli.check.is_some();
+    // The setting only applies at a terminal; pipelines stay plain filters.
+    let agent = cli.agent
+        || cli.do_it
+        || (!cli.no_agent && !validate && !piped && cfg.bool("agent").unwrap_or(false));
+    let mode = if agent {
+        "agent"
+    } else if piped {
+        "pipe"
+    } else {
+        "interactive"
+    };
+    let system = system_prompt(cli, cfg, piped);
+
+    let provider = Provider::resolve(cfg, cli.provider.as_deref())?;
+    let user = combine(&instruction, &payload);
+    let (tier, model) = route(cli, cfg, &provider, user.chars().count() as u64)?;
     let effort = provider.effort(cfg, tier);
     let max_tokens = cfg.num("max_tokens");
-    let user = combine(&instruction, &payload);
+    let summary_model = provider
+        .model(cfg, Tier::Fast)
+        .unwrap_or_else(|_| model.clone());
 
     let record = if cli.record {
         true
@@ -306,18 +762,11 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
         bail!("`cache` must be \"pipe\", \"always\" or \"off\"");
     }
     let use_cache =
-        !cli.no_cache && !cli.agent && (cache_mode == "always" || (cache_mode == "pipe" && piped));
+        !cli.no_cache && !agent && (cache_mode == "always" || (cache_mode == "pipe" && piped));
 
     let cwd = std::env::current_dir()?;
     let dir = store::dir_hash(&cwd);
-    let setting = cfg.num("context").unwrap_or(0) as usize;
-    let ctx_turns = if cli.no_context {
-        0
-    } else if cli.context {
-        if setting > 0 { setting } else { 5 }
-    } else {
-        setting
-    };
+    let ctx_turns = context_turns(cli, cfg);
     let store = if record || use_cache || ctx_turns > 0 {
         Some(Store::open(keychain)?)
     } else {
@@ -326,9 +775,20 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     let history = match &store {
         Some(s) if ctx_turns > 0 => context::build(
             s,
-            &dir,
-            ctx_turns,
-            cfg.num("context_chars").unwrap_or(16_000) as usize,
+            &context::Params {
+                dir: &dir,
+                verbatim: ctx_turns,
+                budget: cfg.num("context_chars").unwrap_or(16_000) as usize,
+                older: cfg.num("context_older").unwrap_or(30) as usize,
+                query: &user,
+                relevant: cfg.num("context_relevant").unwrap_or(3) as usize,
+                visible: &|t| provider.may_see(cfg, &t.provider),
+                summary: (cfg.bool("context_summary") == Some(true)).then(|| context::Summary {
+                    provider: &provider,
+                    model: &summary_model,
+                    blocks: cfg.num("context_blocks").unwrap_or(4) as usize,
+                }),
+            },
         )?,
         _ => Vec::new(),
     };
@@ -343,6 +803,7 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
                 &serde_json::json!(history).to_string(),
                 effort.as_deref().unwrap_or(""),
                 &max_tokens.map(|m| m.to_string()).unwrap_or_default(),
+                if agent { "agent" } else { "" },
             ])
         })
         .unwrap_or_default();
@@ -359,66 +820,20 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     }
 
     let started = Instant::now();
-    let req = Request {
-        model: &model,
-        system: &system,
-        user: &user,
-        history: &history,
-        tools: &[],
-        follow: &[],
-        effort: effort.as_deref(),
-        max_tokens,
+    let call = Call {
+        cli,
+        cfg,
+        provider: &provider,
+        req: Request {
+            history: &history,
+            effort: effort.as_deref(),
+            max_tokens,
+            ..Request::plain(&model, &system, &user)
+        },
+        agent,
+        piped,
     };
-    // A terminal gets the answer as it arrives; a pipe gets it whole, so a wrapping code fence
-    // can be stripped. NOTE: filter the fence while streaming if piped latency ever matters.
-    let mut show = |piece: &str| {
-        if !piped && !validate {
-            print!("{piece}");
-            let _ = std::io::stdout().flush();
-        }
-    };
-    // Checks need the whole answer, so nothing is printed (or saved) until it passes.
-    let attempts = if validate {
-        cfg.num("check_retries").unwrap_or(2) + 1
-    } else {
-        1
-    };
-    let mut tried = 0;
-    let (reply, mut text) = loop {
-        tried += 1;
-        let reply = if cli.agent {
-            agent::run(
-                &agent::Opts {
-                    cfg,
-                    provider: &provider,
-                    model: &model,
-                    effort: effort.as_deref(),
-                    max_tokens,
-                    user: &user,
-                    write: cli.write,
-                    run: cli.run,
-                },
-                &mut show,
-            )?
-        } else {
-            provider.complete(&req, &mut show)?
-        };
-        if reply.stop == "refusal" {
-            bail!("the model declined this request");
-        }
-        let text = if piped || validate {
-            strip_fence(&reply.text)
-        } else {
-            reply.text.clone()
-        };
-        if !validate || check::passes(&text, cli.json, cli.check.as_deref()) {
-            break (reply, text);
-        }
-        if tried >= attempts {
-            bail!("the answer failed the check {tried} time(s); nothing was printed or saved");
-        }
-        eprintln!("[prinia] the answer failed the check; asking again ({tried}/{attempts})");
-    };
+    let (reply, mut text) = call.run()?;
     if !text.ends_with('\n') {
         text.push('\n');
         if !piped && !validate {
@@ -430,43 +845,28 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
         let _ = std::io::stdout().write_all(text.as_bytes());
     }
     let _ = std::io::stdout().flush();
-    let cut_off = matches!(reply.stop.as_str(), "max_tokens" | "length");
-    if cut_off {
+    if matches!(reply.stop.as_str(), "max_tokens" | "length") {
         eprintln!("[prinia] the answer was cut off at the output limit (raise `max_tokens`)");
     }
 
-    // Bookkeeping happens after the output is out, so nothing downstream waits for it.
     if record && let Some(s) = &store {
-        let (repo, branch) = git_info(&cwd);
-        let meta = Meta {
-            dir: &dir,
-            provider: &provider.name,
-            model: &reply.model,
-            mode,
-            tier: if cli.model.is_some() {
-                "custom"
-            } else {
-                tier.name()
-            },
-            input_tokens: reply.input_tokens,
-            output_tokens: reply.output_tokens,
-            duration_ms: started.elapsed().as_millis() as u64,
-            // an answer cut off at the limit stays in the history but never answers a later call
-            cache_key: if cut_off { "" } else { &cache_key },
+        let tier = if cli.model.is_some() {
+            "custom"
+        } else {
+            tier.name()
         };
-        let content = Content {
+        let r = Recorded {
+            dir: &dir,
+            cwd: &cwd,
+            provider: &provider,
+            mode,
+            tier,
+            cache_key: &cache_key,
+            started,
             instruction,
             payload,
-            response: text,
-            cwd: cwd.to_string_lossy().into_owned(),
-            repo,
-            branch,
         };
-        if let Err(e) = s.record(&meta, &content) {
-            eprintln!("[prinia] history not saved: {e:#}");
-        } else {
-            history::enforce_limits(s, cfg);
-        }
+        record_turn(s, cfg, r, &reply, text);
     }
     Ok(())
 }
@@ -477,6 +877,30 @@ fn combine(instruction: &str, payload: &str) -> String {
         (false, true) => instruction.to_string(),
         _ => payload.to_string(),
     }
+}
+
+/// The system prompt for `--cmd`: names the shell and OS, and the modern tools actually installed.
+fn cmd_prompt() -> String {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let shell = shell
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("sh");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let tools: Vec<&str> = ["rg", "fd", "jq", "yq"]
+        .into_iter()
+        .filter(|t| std::env::split_paths(&path).any(|d| d.join(t).is_file()))
+        .collect();
+    format!(
+        "Turn the user's request into ONE shell command for {shell} on {}. Output only the command on a single line: no explanation, no markdown, no code fences. Combine steps with | or &&. Installed tools you may prefer when they fit: {}. If the request is not something a command can do, output a single line starting with # that says why.",
+        std::env::consts::OS,
+        if tools.is_empty() {
+            "none".into()
+        } else {
+            tools.join(", ")
+        }
+    )
 }
 
 fn strip_fence(s: &str) -> String {
@@ -491,6 +915,10 @@ fn strip_fence(s: &str) -> String {
 }
 
 fn git_info(cwd: &Path) -> (Option<String>, Option<String>) {
+    // no `.git` above: skip the two process spawns
+    if !cwd.ancestors().any(|d| d.join(".git").exists()) {
+        return (None, None);
+    }
     let run = |args: &[&str]| {
         Command::new("git")
             .arg("-C")
@@ -561,7 +989,7 @@ fn show_config(cfg: &Config) -> Result<()> {
             .map(|p| p.display().to_string())
             .unwrap_or_default()
     );
-    println!("# env: PRINIA_<KEY> overrides any file; flags override env");
+    println!("# order: flag > .priniarc (directory) > env PRINIA_<KEY> > global file > default");
     for (key, _) in config::KEYS {
         let (value, source) = cfg.describe(key);
         let value: String = value.chars().take(60).collect();
@@ -580,6 +1008,20 @@ fn show_config(cfg: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunks_cut_at_lines_and_lose_nothing() {
+        let text = "aaaa\nbbbb\ncc\n";
+        let c = chunks(text, 10);
+        assert_eq!(c, ["aaaa\nbbbb\n", "cc\n"]);
+        assert_eq!(chunks("xxxxxxxxxxxx", 5).concat(), "xxxxxxxxxxxx");
+        assert!(
+            chunks("é".repeat(7).as_str(), 3)
+                .iter()
+                .all(|p| p.chars().count() <= 3)
+        );
+        assert!(chunks("", 5).is_empty());
+    }
 
     #[test]
     fn combine_and_fence() {

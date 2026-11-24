@@ -34,6 +34,18 @@ export ANTHROPIC_API_KEY=...      # or OPENAI_API_KEY, or configure a local mode
 prinia "hello"
 ```
 
+### Local models
+
+No account or API key needed. With [Ollama](https://ollama.com) running:
+
+```bash
+prinia init
+```
+
+It checks how much memory you have, suggests a model that fits (for example `qwen2.5:14b` on 16 GB or more, plus `qwen2.5:32b` for `-d` on 40 GB or more), offers to `ollama pull` it, and writes `~/.config/prinia/config.toml` (it never overwrites an existing one). To do it by hand, see [Configuration](docs/configuration.md#providers).
+
+Small models (3B and under) invent commands and ignore instructions. Other OpenAI-compatible runners (LM Studio, llama.cpp, vLLM) work with a different `base_url`.
+
 See [Install](docs/install.md) for other platforms and building from source, and [Configuration](docs/configuration.md) for local models and other providers.
 
 ## Usage
@@ -44,11 +56,19 @@ cmd | prinia "instruction" | cmd2    # a pipeline step
 prinia -f "..."                      # fast tier
 prinia -d "..."                      # reasoning tier
 prinia -p local "..."                # a configured provider
+cat list.txt | prinia --each "..."      # one call per line, in parallel (-j N)
+prinia -t NAME "..."                 # a saved instruction (docs/usage.md#templates)
+prinia --cmd "..."                   # one shell command; `eval "$(prinia shell zsh)"` binds it to ctrl-g
+prinia -x "..."                     # let the model run commands to answer (agent + --run); asks before anything not read-only, -y skips that
 prinia -a "..."                     # agent: the model reads and searches files here (--write, --run to allow more)
-prinia -c "..."                     # include earlier turns from this directory
+prinia -c "..."                     # include earlier turns from this directory (recent, relevant, older questions)
+prinia context ["question"]          # show what -c would send
 prinia --no-cache "..."              # ask again even if the call is in your history
 prinia --no-record "..."             # don't save this call
 
+prinia init                          # pick a local model for this machine and write the config
+prinia update [--check]              # update prinia (curl-installed binaries; brew users: brew upgrade)
+prinia trust                         # allow this repo's .priniarc to turn on run/write/agent
 prinia history                       # browse everything you asked (fzf when available)
 prinia history search kestrel        # find turns by words in prompt, input or answer
 prinia history ask "what did I ask about TLS?"   # a fast model answers from your history
@@ -76,7 +96,7 @@ More in [Usage](docs/usage.md) and [History](docs/history.md).
 
 prinia is beta software.
 
-- macOS and Linux are tested. Windows is untested.
+- macOS and Linux are tested. Windows builds and passes the tests in CI, but has not been used by hand.
 - Agent mode has run against a mock server and one OpenAI-compatible provider; the Anthropic tool-call format has not run against the real API yet.
 
 ## License

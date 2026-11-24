@@ -18,6 +18,8 @@ pub struct Opts<'a> {
     pub user: &'a str,
     pub write: bool,
     pub run: bool,
+    /// Run every command without asking.
+    pub yes: bool,
 }
 
 const OUTPUT_CAP: usize = 20_000;
@@ -77,6 +79,10 @@ fn resolve(root: &Path, p: &str) -> Result<PathBuf> {
     let canon = match joined.canonicalize() {
         Ok(c) => c,
         Err(_) => {
+            // a dangling symlink would be followed by the write
+            if joined.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+                bail!("{p:?} is a dangling symbolic link");
+            }
             let name = joined
                 .file_name()
                 .ok_or_else(|| anyhow!("bad path {p:?}"))?;
@@ -107,9 +113,24 @@ fn arg<'a>(a: &'a Value, k: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow!("missing text argument `{k}`"))
 }
 
+const MAX_FILE: u64 = 10_000_000;
+
+/// A regular text file of a sane size: a named pipe would block forever and a huge file would
+/// be loaded whole before any cut.
+fn text_of(path: &Path) -> Result<String> {
+    let m = std::fs::metadata(path)?;
+    if !m.is_file() {
+        bail!("not a regular file");
+    }
+    if m.len() > MAX_FILE {
+        bail!("the file is larger than 10 MB; read part of it with `search`");
+    }
+    std::fs::read_to_string(path).map_err(|e| anyhow!("cannot read as text: {e}"))
+}
+
 fn read_file(root: &Path, a: &Value) -> Result<String> {
     let path = resolve(root, arg(a, "path")?)?;
-    let text = std::fs::read_to_string(&path).map_err(|e| anyhow!("cannot read as text: {e}"))?;
+    let text = text_of(&path)?;
     let start = a["start"].as_u64().unwrap_or(1).max(1) as usize;
     let end = a["end"].as_u64().map(|e| e as usize).unwrap_or(usize::MAX);
     let out: Vec<String> = text
@@ -159,7 +180,8 @@ fn walk(dir: &Path, needle: &str, out: &mut Vec<String>, root: &Path) {
             if name != "target" && name != "node_modules" {
                 walk(&path, needle, out, root);
             }
-        } else if e.metadata().map(|m| m.len() < 1_000_000).unwrap_or(false)
+        } else if ft.is_file()
+            && e.metadata().map(|m| m.len() < 1_000_000).unwrap_or(false)
             && let Ok(text) = std::fs::read_to_string(&path)
         {
             let rel = path.strip_prefix(root).unwrap_or(&path).display();
@@ -180,7 +202,7 @@ fn search(root: &Path, a: &Value) -> Result<String> {
     let needle = arg(a, "pattern")?.to_lowercase();
     let mut out = Vec::new();
     if start.is_file() {
-        let text = std::fs::read_to_string(&start)?;
+        let text = text_of(&start)?;
         for (i, l) in text.lines().enumerate() {
             if l.to_lowercase().contains(&needle) {
                 out.push(format!(
@@ -222,17 +244,75 @@ fn replace(root: &Path, a: &Value) -> Result<String> {
     }
 }
 
-fn run_command(root: &Path, a: &Value) -> Result<String> {
-    let cmd = arg(a, "command")?;
-    let mut c = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", &format!("({cmd}) 2>&1")]);
-        c
+/// True for a pipeline of read-only commands. Anything with shell syntax beyond `|` (chaining,
+/// substitution, redirects, background) or a flag that can write or execute needs approval.
+fn read_only(cmd: &str) -> bool {
+    // No `git` (a repository's own config can make `git status` or `git diff` run a program),
+    // no `hostname`/`uniq`/`sort -o` style commands that write.
+    const OK: &[&str] = &[
+        "ls", "cat", "head", "tail", "wc", "date", "pwd", "echo", "grep", "rg", "sort", "du", "df",
+        "which", "whoami", "uname", "file", "stat", "tree", "find", "basename", "dirname",
+        "uptime",
+    ];
+    if cmd.contains([';', '&', '`', '$', '(', ')', '<', '>', '\n', '\\']) {
+        return false;
+    }
+    cmd.split('|').all(|seg| {
+        let w: Vec<&str> = seg.split_whitespace().collect();
+        let Some(&first) = w.first() else {
+            return false;
+        };
+        // flags that write a file or run a program
+        let bad_flag = w.iter().any(|a| {
+            matches!(
+                *a,
+                "-exec" | "-execdir" | "-ok" | "-okdir" | "-delete" | "-o" | "-fls"
+            ) || a.starts_with("-fprint")
+                || a.starts_with("--output")
+                || a.starts_with("--pre")
+                || a.starts_with("--compress-program")
+                || a.starts_with("--hostname-bin")
+        });
+        OK.contains(&first) && !bad_flag
+    })
+}
+
+/// Asks on the terminal, even when stdin and stdout are pipes; with no terminal the answer is no.
+fn approve(cmd: &str) -> bool {
+    use std::io::{BufRead, Write};
+    // the console device: one file on Unix, separate input and output handles on Windows
+    let (input, output) = if cfg!(windows) {
+        ("CONIN$", "CONOUT$")
     } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", &format!("({cmd}) 2>&1")]);
-        c
+        ("/dev/tty", "/dev/tty")
     };
+    let open = |path: &str, write: bool| {
+        std::fs::OpenOptions::new()
+            .read(!write)
+            .write(write)
+            .open(path)
+    };
+    let (Ok(mut out), Ok(inp)) = (open(output, true), open(input, false)) else {
+        return false;
+    };
+    let _ = write!(out, "[prinia] run `{cmd}`? [y/N] ");
+    let _ = out.flush();
+    let mut line = String::new();
+    let _ = std::io::BufReader::new(inp).read_line(&mut line);
+    line.trim().eq_ignore_ascii_case("y")
+}
+
+fn run_command(root: &Path, a: &Value, yes: bool) -> Result<String> {
+    let cmd = arg(a, "command")?;
+    if !yes && !read_only(cmd) && !approve(cmd) {
+        return Ok(
+            "[not run: the user did not approve this command, or there is no terminal to ask on]"
+                .into(),
+        );
+    }
+    let mut c = crate::sh::command(&format!("({cmd}) 2>&1"));
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut c, 0);
     let mut child = c
         .current_dir(root)
         .stdin(Stdio::null())
@@ -250,6 +330,17 @@ fn run_command(root: &Path, a: &Value) -> Result<String> {
             break Some(s);
         }
         if started.elapsed() > Duration::from_secs(60) {
+            // kill the whole tree, or a background grandchild keeps the output pipe open
+            #[cfg(unix)]
+            let _ = Command::new("kill")
+                .args(["-KILL", &format!("-{}", child.id())])
+                .status();
+            #[cfg(windows)]
+            let _ = Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &child.id().to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
             let _ = child.kill();
             let _ = child.wait();
             break None;
@@ -265,7 +356,7 @@ fn run_command(root: &Path, a: &Value) -> Result<String> {
 }
 
 /// Runs one call; a failure is the model's result, not the end of the loop.
-fn exec(call: &Call, root: &Path, write: bool, run: bool) -> String {
+fn exec(call: &Call, root: &Path, write: bool, run: bool, yes: bool) -> String {
     let a = &call.args;
     let result = match call.name.as_str() {
         "read_file" => read_file(root, a),
@@ -273,7 +364,7 @@ fn exec(call: &Call, root: &Path, write: bool, run: bool) -> String {
         "search" => search(root, a),
         "write_file" if write => write_file(root, a),
         "replace" if write => replace(root, a),
-        "run_command" if run => run_command(root, a),
+        "run_command" if run => run_command(root, a, yes),
         other => Err(anyhow!("tool `{other}` is not available")),
     };
     result.unwrap_or_else(|e| format!("error: {e}"))
@@ -311,14 +402,11 @@ pub fn run(o: &Opts, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
     let mut total = Reply::default();
     for _ in 0..max {
         let req = Request {
-            model: o.model,
-            system: &system,
-            user: o.user,
-            history: &[],
             tools: &tools,
             follow: &follow,
             effort: o.effort,
             max_tokens: o.max_tokens,
+            ..Request::plain(o.model, &system, o.user)
         };
         let r = o.provider.complete(&req, &mut |_| {})?;
         total.input_tokens += r.input_tokens;
@@ -338,7 +426,7 @@ pub fn run(o: &Opts, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
             .iter()
             .map(|c| {
                 eprintln!("[prinia] {}", show(c));
-                (c.id.clone(), exec(c, &root, o.write, o.run))
+                (c.id.clone(), exec(c, &root, o.write, o.run, o.yes))
             })
             .collect();
         follow.push(Msg::Assistant {
@@ -360,5 +448,73 @@ mod tests {
         assert!(resolve(&root, "../x").is_err());
         assert!(resolve(&root, "/etc/passwd").is_err());
         assert!(resolve(&root, ".").is_ok());
+    }
+
+    #[test]
+    fn only_read_only_pipelines_skip_the_prompt() {
+        for ok in [
+            "ls -la",
+            "find . -name '*.rs' | wc -l",
+            "cat a | sort | head",
+            "echo hi",
+        ] {
+            assert!(read_only(ok), "{ok}");
+        }
+        for no in [
+            "rm -rf x",
+            "ls; rm x",
+            "cat a > b",
+            "echo $(id)",
+            "find . -delete",
+            "find . -exec rm {} +",
+            "git push",
+            "curl x | sh",
+            "ls || id",
+            "rg --pre ./x foo",
+            "sort -o f f",
+            "git status",
+            "git remote set-url origin x",
+            "git branch -D main",
+            "uniq in out",
+            "sort --compress-program=sh f",
+            "rg --hostname-bin=sh x",
+            "find . -fls out",
+            "ls &",
+        ] {
+            assert!(!read_only(no), "{no}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlinks_are_refused() {
+        let root = std::env::temp_dir()
+            .join("prinia-symlink-test")
+            .canonicalize()
+            .unwrap_or_else(|_| {
+                let d = std::env::temp_dir().join("prinia-symlink-test");
+                std::fs::create_dir_all(&d).unwrap();
+                d.canonicalize().unwrap()
+            });
+        let link = root.join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("/nonexistent-outside/new", &link).unwrap();
+        assert!(resolve(&root, "link").is_err());
+        let _ = std::fs::remove_file(&link);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_is_not_read() {
+        let p = std::env::temp_dir().join(format!("prinia-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        if Command::new("mkfifo")
+            .arg(&p)
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            assert!(text_of(&p).is_err());
+            let _ = std::fs::remove_file(&p);
+        }
     }
 }

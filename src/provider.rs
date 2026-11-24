@@ -85,6 +85,22 @@ pub struct Request<'a> {
     pub max_tokens: Option<u64>,
 }
 
+impl<'a> Request<'a> {
+    /// A single question with no earlier turns and no tools; callers override what they need.
+    pub fn plain(model: &'a str, system: &'a str, user: &'a str) -> Self {
+        Request {
+            model,
+            system,
+            user,
+            history: &[],
+            tools: &[],
+            follow: &[],
+            effort: None,
+            max_tokens: None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Reply {
     pub text: String,
@@ -104,11 +120,29 @@ impl Provider {
     /// `--provider`, then the `provider` setting, then whichever built-in has its API key set.
     pub fn resolve(cfg: &Config, flag: Option<&str>) -> Result<Provider> {
         let has = |v: &str| std::env::var(v).is_ok_and(|k| !k.is_empty());
-        let name = match flag.map(str::to_owned).or_else(|| cfg.str("provider")) {
-            Some(n) => n,
-            None if has("ANTHROPIC_API_KEY") => "anthropic".into(),
-            None if has("OPENAI_API_KEY") => "openai".into(),
-            None => bail!(
+        let need = cfg.required_tags();
+        let tagged = |n: &str| need.iter().all(|t| cfg.provider_has_tag(n, t));
+        let default = cfg.str("provider");
+        let name = match (flag, default) {
+            (Some(n), _) => n.to_owned(),
+            (None, Some(n)) if tagged(&n) => n,
+            // a project asked for a tag: the first provider (by name) that has it
+            _ if !need.is_empty() => cfg
+                .provider_names()
+                .into_iter()
+                .find(|n| tagged(n))
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "no provider has the tag(s) {}; add `tags = [\"{}\"]` under a [providers.<name>] in your global config",
+                        need.join(", "),
+                        need[0]
+                    )
+                })?,
+            (None, Some(n)) => n,
+            (None, None) if has("ANTHROPIC_API_KEY") => "anthropic".into(),
+            (None, None) if has("OPENAI_API_KEY") => "openai".into(),
+            (None, None) => bail!(
                 "no provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add one to the config, e.g. a local model:\n\n  provider = \"local\"\n  [providers.local]\n  type = \"openai\"\n  base_url = \"http://localhost:11434/v1\"\n  model = \"llama3.2\""
             ),
         };
@@ -149,12 +183,24 @@ impl Provider {
         if api_key.is_none() && official {
             bail!("provider `{name}` needs an API key in ${key_env}");
         }
+        if !tagged(&name) {
+            bail!(
+                "provider `{name}` lacks the required tag(s) {}; pick one that has them (-p NAME) or change the `tag` / `private` setting",
+                need.join(", ")
+            );
+        }
         Ok(Provider {
             name,
             kind,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
         })
+    }
+
+    /// Whether this provider may be shown a turn made with `made_with`: turns from a provider
+    /// tagged `private` only go to another provider tagged `private`.
+    pub fn may_see(&self, cfg: &Config, made_with: &str) -> bool {
+        cfg.provider_has_tag(&self.name, "private") || !cfg.provider_has_tag(made_with, "private")
     }
 
     /// The provider's own table wins over the top-level setting, then the built-in default.
@@ -210,6 +256,9 @@ impl Provider {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_connect(Some(Duration::from_secs(15)))
+            // ponytail: no idle timeout in ureq; these backstops cover a hung server, a cold local model load fits in 5 min
+            .timeout_recv_response(Some(Duration::from_secs(300)))
+            .timeout_recv_body(Some(Duration::from_secs(1800)))
             .build()
             .into();
 
@@ -256,11 +305,15 @@ impl Provider {
             model: req.model.to_string(),
             ..Default::default()
         };
+        let mut done = false;
         for line in BufReader::new(resp.into_body().into_reader()).lines() {
             let line = line.context("the response stream broke off")?;
             let Some(data) = line.strip_prefix("data:").map(str::trim) else {
                 continue;
             };
+            if data == "[DONE]" {
+                done = true;
+            }
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
@@ -275,6 +328,10 @@ impl Provider {
                 on_text(&t);
                 reply.text.push_str(&t);
             }
+        }
+        // a finish reason or the closing `[DONE]` marks a complete answer; a dropped connection has neither
+        if reply.stop.is_empty() && !done {
+            bail!("the response ended before the model finished (connection dropped?)");
         }
         reply.calls = reply
             .pending

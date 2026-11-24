@@ -6,11 +6,24 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Windows cannot open a socket without `SystemRoot` (os error 10106), so a cleared
+/// environment keeps it, and the temp folders, wherever they exist.
+fn windows_basics() -> Vec<(String, String)> {
+    ["SystemRoot", "TEMP", "TMP"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+        .collect()
+}
+
 #[derive(Clone)]
 enum Step {
     Text(&'static str),
     /// text, ended by the output limit (OpenAI-style `length`)
     Cut(&'static str),
+    /// text with no finish reason, closed by `[DONE]`
+    NoFinish(&'static str),
+    /// text with no finish reason and no `[DONE]`: a dropped connection
+    Dropped(&'static str),
     /// tool name, arguments as JSON text
     Call(&'static str, &'static str),
 }
@@ -94,7 +107,9 @@ impl Mock {
                     )
                 } else {
                     let shown = match &step {
-                        Some(Step::Text(t)) | Some(Step::Cut(t)) => *t,
+                        Some(
+                            Step::Text(t) | Step::Cut(t) | Step::NoFinish(t) | Step::Dropped(t),
+                        ) => *t,
                         _ => text,
                     };
                     let (a, b) = shown.split_at(shown.len() / 2);
@@ -115,15 +130,19 @@ impl Mock {
                     } else {
                         format!(
                             "data: {{\"model\":\"served-model\",\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n\
-                             data: {{\"model\":\"served-model\",\"choices\":[{{\"delta\":{{\"content\":{}}},\"finish_reason\":\"{}\"}}]}}\n\n\
-                             data: {{\"model\":\"served-model\",\"choices\":[],\"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":3}}}}\n\n\
-                             data: [DONE]\n\n",
+                             data: {{\"model\":\"served-model\",\"choices\":[{{\"delta\":{{\"content\":{}}},\"finish_reason\":{}}}]}}\n\n\
+                             data: {{\"model\":\"served-model\",\"choices\":[],\"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":3}}}}\n\n{}",
                             q(a),
                             q(b),
-                            if matches!(step, Some(Step::Cut(_))) {
-                                "length"
+                            match step {
+                                Some(Step::Cut(_)) => "\"length\"",
+                                Some(Step::NoFinish(_) | Step::Dropped(_)) => "null",
+                                _ => "\"stop\"",
+                            },
+                            if matches!(step, Some(Step::Dropped(_))) {
+                                ""
                             } else {
-                                "stop"
+                                "data: [DONE]\n\n"
                             }
                         )
                     };
@@ -183,6 +202,7 @@ impl Env {
         cmd.args(args)
             .current_dir(self.dir.join("work"))
             .env_clear()
+            .envs(windows_basics())
             .env("PATH", std::env::var("PATH").unwrap_or_default())
             .env("HOME", &self.dir)
             .env("PRINIA_CONFIG", self.dir.join("cfg/config.toml"))
@@ -302,6 +322,454 @@ fn openai_compatible_provider() {
 }
 
 #[test]
+fn each_runs_one_call_per_line_and_reports_failures() {
+    let mock = Mock::start("answer", 200);
+    let env = Env::new("each", &mock);
+    let (out, err, code) = env.run(
+        &["-p", "local", "--each", "-j", "2", "summarize"],
+        "a\n\nb\nc\n",
+        &[],
+    );
+    assert_eq!(
+        (out.as_str(), code),
+        ("answer\nanswer\nanswer\n", 0),
+        "stderr: {err}"
+    );
+    assert_eq!(mock.hits(), 3, "blank lines are skipped, one call per line");
+
+    let bad = Mock::start("x", 401);
+    let env = Env::new("each-bad", &bad);
+    let (out, err, code) = env.run(&["-p", "local", "--each", "q"], "a\nb\n", &[]);
+    assert!(
+        code != 0 && out == "\n\n" && err.contains("line 1 failed"),
+        "{out:?} {err}"
+    );
+}
+
+#[test]
+fn private_mode_allows_only_providers_marked_private() {
+    let mock = Mock::start("ok", 200);
+    let env = Env::new("private", &mock);
+    let cfg = env.dir.join("cfg/config.toml");
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!(
+        "\n[providers.corp]\ntype = \"openai\"\nbase_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"m\"\nprivate = true\n",
+        mock.port
+    ));
+    std::fs::write(&cfg, text).unwrap();
+    // a project file switches it on; the user's own env cannot undo it
+    std::fs::write(env.dir.join("work/.priniarc"), "private = true\n").unwrap();
+    for p in ["local", "anthropic"] {
+        let (_, err, code) = env.run(&["-p", p, "q"], "", &[("PRINIA_PRIVATE", "0")]);
+        assert!(
+            code != 0 && err.contains("lacks the required tag"),
+            "{p}: {err}"
+        );
+    }
+    assert_eq!(mock.hits(), 0, "nothing was sent");
+    let (out, err, code) = env.run(&["-p", "corp", "q"], "", &[]);
+    assert_eq!((out.as_str(), code), ("ok\n", 0), "{err}");
+}
+
+#[test]
+fn a_project_tag_picks_the_provider_that_has_it() {
+    let mock = Mock::start("tagged", 200);
+    let env = Env::new("tags", &mock);
+    let cfg = env.dir.join("cfg/config.toml");
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!(
+        "\n[providers.work]\ntype = \"openai\"\nbase_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"m\"\ntags = [\"work\", \"eu\"]\n",
+        mock.port
+    ));
+    std::fs::write(&cfg, text).unwrap();
+    std::fs::write(env.dir.join("work/.priniarc"), "tag = \"work\"\n").unwrap();
+    // no -p and no `provider` setting: the tag chooses
+    let (out, err, code) = env.run(&["q"], "", &[]);
+    assert_eq!((out.as_str(), code), ("tagged\n", 0), "{err}");
+    let (_, err, code) = env.run(&["-p", "local", "q"], "", &[]);
+    assert!(code != 0 && err.contains("lacks the required tag"), "{err}");
+    std::fs::write(env.dir.join("work/.priniarc"), "tag = \"nobody\"\n").unwrap();
+    let (_, err, code) = env.run(&["q"], "", &[]);
+    assert!(
+        code != 0 && err.contains("no provider has the tag"),
+        "{err}"
+    );
+}
+
+#[test]
+fn context_pulls_in_older_turns_that_match_the_new_question() {
+    let mock = Mock::start("an answer", 200);
+    let env = Env::new("ctx-relevant", &mock);
+    for q in [
+        "how do I rotate the payments api keys",
+        "what is a unix pipe",
+        "explain git rebase",
+        "make vs ninja",
+        "list open ports",
+    ] {
+        env.run(&["-p", "local", q], "", &[]);
+    }
+    let on = [("PRINIA_CONTEXT", "1"), ("PRINIA_CONTEXT_OLDER", "0")];
+    let (_, err, code) = env.run(&["-p", "local", "-c", "payments api timeout"], "", &on);
+    assert_eq!(code, 0, "{err}");
+    let (_, body) = mock.last();
+    let all = body["messages"].to_string();
+    assert!(all.contains("rotate the payments api keys"), "{all}");
+    assert!(
+        all.contains("list open ports"),
+        "the newest turn is still sent verbatim"
+    );
+    assert!(
+        !all.contains("unix pipe") && !all.contains("git rebase"),
+        "{all}"
+    );
+    let (out, _, _) = env.run(&["context", "payments api timeout"], "", &on);
+    assert!(
+        out.contains("rotate the payments api keys") && !out.contains("unix pipe"),
+        "{out}"
+    );
+    // `context_relevant = 0` switches it off
+    let off = [
+        ("PRINIA_CONTEXT", "1"),
+        ("PRINIA_CONTEXT_OLDER", "0"),
+        ("PRINIA_CONTEXT_RELEVANT", "0"),
+    ];
+    env.run(&["-p", "local", "-c", "payments api timeout 2"], "", &off);
+    assert!(
+        !mock.last().1["messages"]
+            .to_string()
+            .contains("rotate the payments")
+    );
+}
+
+#[test]
+fn a_dropped_stream_is_an_error_but_done_without_a_finish_reason_is_complete() {
+    let mock = Mock::start_with("", 200, vec![Step::Dropped("half an ans")]);
+    let env = Env::new("dropped", &mock);
+    let (out, err, code) = env.run(&["-p", "local", "q"], "", &[]);
+    assert!(
+        code != 0 && out.is_empty() && err.contains("ended before"),
+        "{out:?} {err}"
+    );
+    let (shown, _, _) = env.run(&["history", "show", "1"], "", &[]);
+    assert!(
+        !shown.contains("half an ans"),
+        "a cut-off answer must not be saved"
+    );
+
+    let mock = Mock::start_with("", 200, vec![Step::NoFinish("whole answer")]);
+    let env = Env::new("no-finish", &mock);
+    let (out, err, code) = env.run(&["-p", "local", "q"], "", &[]);
+    assert_eq!((out.as_str(), code), ("whole answer\n", 0), "{err}");
+}
+
+#[test]
+fn turns_from_a_private_provider_are_not_sent_to_another_one() {
+    let mock = Mock::start("an answer", 200);
+    let env = Env::new("private-turns", &mock);
+    let cfg = env.dir.join("cfg/config.toml");
+    let text = std::fs::read_to_string(&cfg).unwrap().replace(
+        "type = \"openai\"",
+        "type = \"openai\"\ntags = [\"private\"]",
+    );
+    std::fs::write(&cfg, text).unwrap();
+    env.run(&["-p", "local", "secret roadmap question"], "", &[]);
+    let ctx = [("PRINIA_CONTEXT", "5")];
+    // a private provider sees it; the cloud one does not
+    env.run(&["-p", "local", "-c", "follow up"], "", &ctx);
+    assert!(mock.last().1.to_string().contains("secret roadmap"));
+    env.run(&["-p", "anthropic", "-c", "follow up"], "", &ctx);
+    assert!(!mock.last().1.to_string().contains("secret roadmap"));
+    // `history ask` goes to the default (cloud) provider: the private turn must not be in it
+    let (_, err, code) = env.run(&["history", "ask", "what was the roadmap"], "", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!mock.last().1.to_string().contains("secret roadmap"));
+}
+
+#[test]
+fn long_input_is_split_once_even_when_a_project_sets_max_input() {
+    let mock = Mock::start("partial", 200);
+    let env = Env::new("max-input", &mock);
+    // a project file beats the environment, so the children must not rely on an env override
+    std::fs::write(env.dir.join("work/.priniarc"), "max_input = 40\n").unwrap();
+    let input = (0..6)
+        .map(|n| format!("line-{n}-aaaaaaaa\n"))
+        .collect::<String>(); // 96 characters
+    let (out, err, code) = env.run(&["-p", "local", "summarize this"], &input, &[]);
+    assert_eq!((out.as_str(), code), ("partial\n", 0), "{err}");
+    // three parts of at most 40 characters, then one combining call (itself over 40, never re-split)
+    assert_eq!(mock.hits(), 4, "{err}");
+    let last = mock.last().1.to_string();
+    assert!(
+        last.contains("--- part 1 ---") && last.contains("Combine them"),
+        "{last}"
+    );
+    assert!(
+        last.contains("summarize this"),
+        "the combining call carries the instruction"
+    );
+}
+
+#[test]
+fn trust_shows_the_file_asks_and_expires_when_the_file_changes() {
+    let mock = Mock::start("ok", 200);
+    let env = Env::new("trust", &mock);
+    let rc = env.dir.join("work/.priniarc");
+    std::fs::write(&rc, "run = true\n").unwrap();
+    let run_setting = |env: &Env| env.run(&["config"], "", &[]).0;
+    assert!(
+        !run_setting(&env)
+            .lines()
+            .any(|l| l.starts_with("run ") && l.contains("true"))
+    );
+    // no terminal and no --yes: nothing is trusted
+    let (out, err, code) = env.run(&["trust"], "", &[]);
+    assert!(
+        code != 0 && out.contains("run = true") && err.contains("--yes"),
+        "{out} {err}"
+    );
+    assert!(
+        !run_setting(&env)
+            .lines()
+            .any(|l| l.starts_with("run ") && l.contains("true"))
+    );
+    let (_, err, code) = env.run(&["trust", "--yes"], "", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        run_setting(&env)
+            .lines()
+            .any(|l| l.starts_with("run ") && l.contains("true"))
+    );
+    // any change to the file needs trusting again
+    std::fs::write(&rc, "run = true\nwrite = true\n").unwrap();
+    assert!(
+        !run_setting(&env)
+            .lines()
+            .any(|l| l.starts_with("run ") && l.contains("true"))
+    );
+}
+
+#[test]
+fn init_reports_when_there_is_no_model_server_and_writes_nothing() {
+    let mock = Mock::start("x", 200);
+    let env = Env::new("init", &mock);
+    let down = [("PRINIA_OLLAMA_URL", "http://127.0.0.1:1")];
+    let (out, _, code) = env.run(&["init"], "", &down);
+    assert_eq!(code, 0);
+    assert!(out.contains("An API key is set"), "{out}");
+    let (out, _, code) = env.run(&["init"], "", &[down[0], ("ANTHROPIC_API_KEY", "")]);
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("No model server found at http://127.0.0.1:1"),
+        "{out}"
+    );
+}
+
+#[cfg(unix)]
+/// A tiny release server: `/api` answers like GitHub's "latest release", `/install.sh` is the installer.
+fn release_server(tag: &'static str, installer: &'static str) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = if req.starts_with("GET /api") {
+                format!("{{\"tag_name\":\"{tag}\"}}")
+            } else if req.starts_with("GET /install.sh") {
+                installer.to_string()
+            } else {
+                String::new()
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    port
+}
+
+#[cfg(unix)]
+#[test]
+fn update_checks_versions_and_runs_the_installer_only_for_a_self_managed_binary() {
+    let mock = Mock::start("x", 200);
+    let env = Env::new("update", &mock);
+    let marker = env.dir.join("bin/marker");
+    let port = release_server(
+        "v99.0.0",
+        "echo \"ran in $PRINIA_INSTALL_DIR\" > \"$PRINIA_INSTALL_DIR/marker\"\n",
+    );
+    let api = format!("http://127.0.0.1:{port}/api");
+    let base = format!("http://127.0.0.1:{port}");
+    let env_vars = [
+        ("PRINIA_RELEASES_API", api.as_str()),
+        ("PRINIA_DOWNLOAD_URL", base.as_str()),
+    ];
+
+    // --check only compares versions, from the real (development-build) path
+    let (out, err, code) = env.run(&["update", "--check"], "", &env_vars);
+    assert!(
+        code == 0 && out.contains("v99.0.0 is available"),
+        "{out} {err}"
+    );
+    // a development build is not self-updated
+    let (_, err, code) = env.run(&["update"], "", &env_vars);
+    assert!(code != 0 && err.contains("development build"), "{err}");
+
+    // a copy outside any package manager or build tree is updated in place by the installer
+    std::fs::create_dir_all(env.dir.join("bin")).unwrap();
+    let copy = env.dir.join("bin/prinia");
+    std::fs::copy(env!("CARGO_BIN_EXE_prinia"), &copy).unwrap();
+    let run_copy = |extra: &[(&str, &str)]| {
+        Command::new(&copy)
+            .args(["update"])
+            .env_clear()
+            .envs(windows_basics())
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .envs(extra.iter().copied())
+            .output()
+            .unwrap()
+    };
+    let out = run_copy(&env_vars);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ran = std::fs::read_to_string(&marker).unwrap();
+    assert!(ran.contains("bin"), "{ran}");
+
+    // when the installer fails, the user is told nothing changed
+    let bad_port = release_server("v99.0.0", "exit 3\n");
+    let bad_base = format!("http://127.0.0.1:{bad_port}");
+    let bad_api = format!("http://127.0.0.1:{bad_port}/api");
+    let out = run_copy(&[
+        ("PRINIA_RELEASES_API", &bad_api),
+        ("PRINIA_DOWNLOAD_URL", &bad_base),
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("prinia was not changed"));
+
+    // already current: nothing to do
+    let same = release_server(concat!("v", env!("CARGO_PKG_VERSION")), "exit 9\n");
+    let same_api = format!("http://127.0.0.1:{same}/api");
+    let out = run_copy(&[("PRINIA_RELEASES_API", &same_api)]);
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("latest release")
+    );
+}
+
+#[test]
+fn many_first_calls_at_once_share_one_key() {
+    let mock = Mock::start("answer", 200);
+    let env = Env::new("first-use-race", &mock);
+    let lines = (0..16).map(|n| format!("l{n}\n")).collect::<String>();
+    let (_, err, code) = env.run(&["-p", "local", "--each", "-j", "16", "q"], &lines, &[]);
+    assert_eq!(code, 0, "{err}");
+    // every turn decrypts with the one key that exists
+    let (out, err, code) = env.run(&["history", "show", "16"], "", &[]);
+    assert!(code == 0 && out.contains("answer"), "{out} {err}");
+}
+
+#[test]
+fn context_has_verbatim_turns_then_one_line_questions() {
+    let mock = Mock::start("an answer", 200);
+    let env = Env::new("ctx-tiers", &mock);
+    for q in [
+        "first question",
+        "second question",
+        "third question",
+        "fourth question",
+    ] {
+        env.run(&["-p", "local", q], "", &[]);
+    }
+    let (_, err, code) = env.run(
+        &["-p", "local", "-c", "fifth"],
+        "",
+        &[("PRINIA_CONTEXT", "1"), ("PRINIA_CONTEXT_OLDER", "2")],
+    );
+    assert_eq!(code, 0, "{err}");
+    let (_, body) = mock.last();
+    let msgs = body["messages"].as_array().unwrap();
+    let text: Vec<String> = msgs
+        .iter()
+        .map(|m| m["content"].as_str().unwrap_or("").to_string())
+        .collect();
+    // system, questions note, "Understood.", the newest turn, its answer, the new question
+    assert!(text[1].contains("Earlier questions"), "{text:?}");
+    assert!(
+        text[1].contains("- second question") && text[1].contains("- third question"),
+        "{}",
+        text[1]
+    );
+    assert!(
+        !text[1].contains("first question") && !text[1].contains("fourth"),
+        "{}",
+        text[1]
+    );
+    assert_eq!(text[3], "fourth question");
+    assert_eq!(text.last().unwrap(), "fifth");
+}
+
+#[test]
+fn context_command_shows_what_c_would_send() {
+    let mock = Mock::start("an answer", 200);
+    let env = Env::new("ctx-show", &mock);
+    let (out, _, _) = env.run(&["-p", "local", "context"], "", &[]);
+    assert!(out.contains("no history"), "{out}");
+    for q in ["alpha question", "beta question"] {
+        env.run(&["-p", "local", q], "", &[]);
+    }
+    let (out, err, code) = env.run(&["-p", "local", "context"], "", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("alpha question")
+            && out.contains("beta question")
+            && out.contains("an answer"),
+        "{out}"
+    );
+}
+
+#[test]
+fn old_blocks_are_summarized_once_and_rebuilt_after_a_delete() {
+    let mock = Mock::start("an answer", 200);
+    let env = Env::new("ctx-summary", &mock);
+    for n in 0..60 {
+        env.run(&["-p", "local", &format!("question {n}")], "", &[]);
+    }
+    let on = [
+        ("PRINIA_CONTEXT", "1"),
+        ("PRINIA_CONTEXT_OLDER", "2"),
+        ("PRINIA_CONTEXT_SUMMARY", "1"),
+    ];
+    let before = mock.hits();
+    let (_, err, code) = env.run(&["-p", "local", "-c", "next"], "", &on);
+    assert_eq!(code, 0, "{err}");
+    // two complete older blocks were summarized, then the real call
+    assert_eq!(mock.hits(), before + 3);
+    let (_, body) = mock.last();
+    let first = body["messages"][1]["content"].as_str().unwrap();
+    assert!(first.starts_with("Summaries of older exchanges"), "{first}");
+    let before = mock.hits();
+    env.run(&["-p", "local", "-c", "again"], "", &on);
+    assert_eq!(
+        mock.hits(),
+        before + 1,
+        "summaries come from the stored copy"
+    );
+
+    // deleting any turn drops the stored summaries; they are rebuilt from what is left
+    env.run(&["history", "rm", "3", "--yes"], "", &[]);
+    let before = mock.hits();
+    env.run(&["-p", "local", "-c", "after delete"], "", &on);
+    assert_eq!(mock.hits(), before + 3);
+}
+
+#[test]
 fn piped_output_loses_its_code_fence() {
     let mock = Mock::start("```json\n{\"a\":1}\n```", 200);
     let env = Env::new("fence", &mock);
@@ -417,9 +885,10 @@ fn context_comes_from_history_of_this_directory() {
         "",
         &[("PRINIA_CONTEXT", "1")],
     );
-    assert_eq!(mock.last().1["messages"].as_array().unwrap().len(), 4);
+    // system + older-questions note (2) + the one verbatim turn (2) + the new question
+    assert_eq!(mock.last().1["messages"].as_array().unwrap().len(), 6);
     env.run(&args("", "fifth question"), "", &[("PRINIA_CONTEXT", "1")]);
-    assert_eq!(mock.last().1["messages"].as_array().unwrap().len(), 4);
+    assert_eq!(mock.last().1["messages"].as_array().unwrap().len(), 6);
     env.run(
         &args("--no-context", "sixth"),
         "",
@@ -433,6 +902,7 @@ fn context_comes_from_history_of_this_directory() {
         .args(["-c", "seventh question"])
         .current_dir(env.dir.join("work/other"))
         .env_clear()
+        .envs(windows_basics())
         .env("HOME", &env.dir)
         .env("PRINIA_CONFIG", env.dir.join("cfg/config.toml"))
         .env("PRINIA_DB", env.db())
@@ -630,6 +1100,7 @@ fn stats_count_calls_hits_and_tokens_without_the_key() {
         .args(["stats", "--here", "--json"])
         .current_dir(env.dir.join("work/elsewhere"))
         .env_clear()
+        .envs(windows_basics())
         .env("HOME", &env.dir)
         .env("PRINIA_CONFIG", env.dir.join("cfg/config.toml"))
         .env("PRINIA_DB", env.db())
@@ -766,10 +1237,6 @@ fn agent_changes_files_and_runs_commands_only_when_allowed() {
     env.run(&["-a", "--run", "go"], "", &[]);
     let r = result_of_first_call(&mock);
     assert!(r.contains("hi-from-run") && r.contains("[exit 0]"), "{r}");
-
-    // --write and --run only make sense with --agent
-    let (_, err, code) = env.run(&["--write", "x"], "", &[]);
-    assert!(code != 0 && err.contains("--agent"), "{err}");
 }
 
 #[test]

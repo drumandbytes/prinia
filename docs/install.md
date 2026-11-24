@@ -18,6 +18,19 @@ The script picks the release for your OS and architecture, verifies it against t
 | `PRINIA_INSTALL_DIR=/usr/local/bin` | Install somewhere else |
 | `PRINIA_DOWNLOAD_URL=...` | Download from a mirror |
 
+## Updating
+
+```bash
+prinia update --check     # is a newer release out?
+prinia update             # install it in place
+```
+
+`prinia update` downloads the installer from the latest release and runs it into the folder the current binary lives in, so it does exactly what the install script does, including the checksum check; the installer is the only copy of that logic. Nothing is checked or downloaded unless you run the command.
+
+It refuses for a binary installed by Homebrew or cargo (use `brew upgrade prinia` or `cargo install`) and for a development build. It is not available on Windows. Running the install script again always works as well, for any version.
+
+Note that the checksum comes from the same release as the binary: it catches a corrupt download, not a compromised release.
+
 ## Homebrew
 
 ```bash
@@ -40,9 +53,9 @@ Building needs a Rust toolchain and a C compiler (SQLite and zstd are compiled f
 | :--- | :--- | :--- |
 | macOS, arm64 and x86-64 | yes | yes |
 | Linux, arm64 and x86-64 | yes (glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40) | yes |
-| Windows | no | no |
+| Windows | no | in CI only |
 
-On older Linux systems, build from source. Windows has code paths (Credential Manager for the optional [credential store](history.md#where-the-key-lives)) that have never been built or run.
+On older Linux systems, build from source. On Windows, build from source (`cargo install --path .`). It builds and passes the test suite in CI on every change, but nobody has used it by hand yet: the command approval prompt (`CONIN$` / `CONOUT$`) and the Credential Manager key store (`keychain = true`) have not run on a real Windows console.
 
 The command is `prinia`. If you want something shorter, alias it in your shell: `alias ai=prinia`.
 

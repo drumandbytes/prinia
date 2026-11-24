@@ -65,7 +65,15 @@ prinia history search kestrel nest      # turns containing every word, any case,
 prinia history ask "what did I ask about TLS last month?"
 ```
 
-`search` is plain text matching and makes no network call. `ask` sends excerpts of your most recent turns to the fast model and prints its answer, so those excerpts leave your machine like any other prompt. The excerpt size and how many turns are scanned are settings (`excerpt_prompt`, `excerpt_reply`, `history_scan`). Neither command is recorded in the history. Filters (`--since`, `--older`, `--here`) narrow what is searched.
+`search` is plain text matching and makes no network call.
+
+`ask` finds the turns that match your question across the whole history, then a fast model answers from them:
+
+1. **Time:** words like `yesterday`, `last week`, `last month`, `this week` or `3 days ago` narrow the range (generously: "last week" means the past two weeks). `--since`, `--older` and `--here` replace the guess. If nothing falls in the guessed range, it searches everything.
+2. **Keywords:** the remaining meaningful words are matched against prompt, input and answer; a match in the prompt counts most. With no keyword hit, the newest turns are used.
+3. **Answer:** the best `ask_turns` turns (default 15) go to the model with longer excerpts (`excerpt_prompt` 400, `excerpt_reply` 1000 characters), and it answers citing `#id`. If they do not contain the answer it should say so. stderr lists the turns used; open one with `prinia history show ID`.
+
+Those excerpts leave your machine like any other prompt, so `ask` uses your configured provider and the `private` / `tag` rules apply. Turns made with a `private` provider are left out unless the provider answering is `private` too (the same goes for `history agent`). It is not recorded. Matching is plain words, not meaning: ask with the words you would have used at the time.
 
 ## Deleting
 

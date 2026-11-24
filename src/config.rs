@@ -26,13 +26,24 @@ pub const KEYS: &[(&str, Ty)] = &[
     ("cache_ttl", Ty::Str),
     ("context", Ty::Num),
     ("context_chars", Ty::Num),
+    ("context_older", Ty::Num),
+    ("context_relevant", Ty::Num),
+    ("context_summary", Ty::Bool),
+    ("context_blocks", Ty::Num),
     ("max_size", Ty::Str),
     ("max_age", Ty::Str),
     ("fast_under", Ty::Num),
     ("deep_over", Ty::Num),
     ("history_scan", Ty::Num),
+    ("ask_turns", Ty::Num),
     ("excerpt_prompt", Ty::Num),
     ("excerpt_reply", Ty::Num),
+    ("agent", Ty::Bool),
+    ("write", Ty::Bool),
+    ("run", Ty::Bool),
+    ("max_input", Ty::Num),
+    ("private", Ty::Bool),
+    ("tag", Ty::Str),
     ("agent_steps", Ty::Num),
     ("check_retries", Ty::Num),
     ("keychain", Ty::Bool),
@@ -40,8 +51,116 @@ pub const KEYS: &[(&str, Ty)] = &[
     ("prompt_interactive", Ty::Str),
 ];
 
+/// Behaviour keys a repository's `.priniarc` may not turn on until the user runs `prinia trust`:
+/// they let the model act on the machine or change what it is told.
+const RISKY: &[&str] = &["run", "write", "agent", "prompt_pipe", "prompt_interactive"];
+
+/// What a repository's `.priniarc` may set: how prinia behaves in that directory. Where data goes
+/// (provider, models, keys) and how the shared history is kept are decisions for the device.
+const PROJECT: &[&str] = &[
+    "record",
+    "cache",
+    "cache_ttl",
+    "context",
+    "context_chars",
+    "context_older",
+    "context_relevant",
+    "context_summary",
+    "context_blocks",
+    "max_tokens",
+    "effort",
+    "fast_effort",
+    "deep_effort",
+    "fast_under",
+    "deep_over",
+    "check_retries",
+    "max_input",
+    "private",
+    "tag",
+    "agent",
+    "agent_steps",
+    "run",
+    "write",
+    "prompt_pipe",
+    "prompt_interactive",
+];
+
+fn trust_path() -> Option<PathBuf> {
+    Some(global_path()?.with_file_name("trusted"))
+}
+
+fn digest(text: &str) -> String {
+    blake3::hash(text.as_bytes()).to_hex().to_string()
+}
+
+fn is_trusted(text: &str) -> bool {
+    trust_path()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .is_some_and(|t| t.lines().any(|l| l.trim() == digest(text)))
+}
+
+/// The `.priniarc` files above `cwd` as (path, contents, already trusted), nearest first.
+pub fn project_files(cwd: &Path) -> Vec<(PathBuf, String, bool)> {
+    cwd.ancestors()
+        .map(|d| d.join(".priniarc"))
+        .filter_map(|p| {
+            let text = fs::read_to_string(&p).ok()?;
+            let trusted = is_trusted(&text);
+            Some((p, text, trusted))
+        })
+        .collect()
+}
+
+/// Trusts the exact contents given; an edit to a file revokes it.
+pub fn trust(texts: &[&str]) -> std::io::Result<()> {
+    let Some(tp) = trust_path() else {
+        return Ok(());
+    };
+    let mut known = fs::read_to_string(&tp).unwrap_or_default();
+    for t in texts {
+        known.push_str(&digest(t));
+        known.push('\n');
+    }
+    if let Some(d) = tp.parent() {
+        fs::create_dir_all(d)?;
+    }
+    fs::write(tp, known)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Layer {
+    Project,
+    Env,
+    Global,
+}
+
+/// A saved instruction: the nearest `.prinia/templates/NAME` above `cwd`, else the config directory's.
+pub fn template(name: &str, cwd: &Path) -> anyhow::Result<String> {
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+        anyhow::bail!("bad template name {name:?}");
+    }
+    let mut dirs: Vec<PathBuf> = cwd
+        .ancestors()
+        .map(|d| d.join(".prinia/templates"))
+        .collect();
+    dirs.extend(global_path().and_then(|p| Some(p.parent()?.join("templates"))));
+    for d in &dirs {
+        if let Ok(t) = fs::read_to_string(d.join(name)) {
+            return Ok(t.trim().to_string());
+        }
+    }
+    anyhow::bail!(
+        "no template `{name}`; put the instruction in .prinia/templates/{name} or {}",
+        dirs.last()
+            .map(|d| d.join(name).display().to_string())
+            .unwrap_or_default()
+    )
+}
+
 pub struct Config {
-    table: Table,
+    /// `.priniarc` files, nearest last.
+    project: Table,
+    global: Table,
     providers: Table,
     pub files: Vec<PathBuf>,
 }
@@ -85,13 +204,14 @@ impl Config {
     }
 
     pub fn load_from(global: Option<PathBuf>, cwd: &Path) -> Config {
-        let mut paths: Vec<PathBuf> = global.into_iter().collect();
+        let mut paths: Vec<PathBuf> = global.iter().cloned().collect();
         let mut dirs: Vec<PathBuf> = cwd.ancestors().map(|d| d.join(".priniarc")).collect();
         dirs.reverse(); // farthest first, so the nearest file wins
         paths.extend(dirs);
 
         let mut cfg = Config {
-            table: Table::new(),
+            project: Table::new(),
+            global: Table::new(),
             providers: Table::new(),
             files: Vec::new(),
         };
@@ -99,6 +219,8 @@ impl Config {
             let Ok(text) = fs::read_to_string(&p) else {
                 continue;
             };
+            let global = Some(&p) == global.as_ref();
+            let trusted = global || is_trusted(&text);
             let t = match toml::from_str::<Table>(&text) {
                 Ok(t) => t,
                 Err(e) => {
@@ -107,9 +229,35 @@ impl Config {
                 }
             };
             for (k, v) in t {
+                if !global
+                    && k != "providers"
+                    && !PROJECT.contains(&k.as_str())
+                    && KEYS.iter().any(|(n, _)| *n == k)
+                {
+                    eprintln!(
+                        "[prinia] {}: `{k}` is device-level; set it in your global config",
+                        p.display()
+                    );
+                    continue;
+                }
+                // a repo may always tighten (`run = false`); loosening needs trust
+                if !trusted && RISKY.contains(&k.as_str()) && v != Value::Boolean(false) {
+                    eprintln!(
+                        "[prinia] {}: `{k}` ignored until you run `prinia trust` here",
+                        p.display()
+                    );
+                    continue;
+                }
                 // a typo must not silently change behaviour, and a bad value must not shadow a
                 // good one from a lower layer
                 if k == "providers" {
+                    if !global {
+                        eprintln!(
+                            "[prinia] {}: providers are device-level; define them in your global config",
+                            p.display()
+                        );
+                        continue;
+                    }
                     match v {
                         Value::Table(ps) => cfg
                             .providers
@@ -131,7 +279,11 @@ impl Config {
                         p.display()
                     ),
                     Some(_) => {
-                        cfg.table.insert(k, v);
+                        if global {
+                            cfg.global.insert(k, v);
+                        } else {
+                            cfg.project.insert(k, v);
+                        }
                     }
                 }
             }
@@ -140,33 +292,38 @@ impl Config {
         cfg
     }
 
+    /// Directory settings win over the environment, which wins over the global file, so a
+    /// project can say "never record" and have it hold. Flags are applied by the caller.
+    fn layered(&self, key: &str) -> Option<(Layer, Value)> {
+        if let Some(v) = self.project.get(key) {
+            return Some((Layer::Project, v.clone()));
+        }
+        if let Some(e) = env(key) {
+            return Some((Layer::Env, Value::String(e)));
+        }
+        self.global.get(key).map(|v| (Layer::Global, v.clone()))
+    }
+
     pub fn str(&self, key: &str) -> Option<String> {
-        env(key).or_else(|| {
-            self.table
-                .get(key)
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        })
+        self.layered(key)?.1.as_str().map(str::to_owned)
     }
 
     pub fn bool(&self, key: &str) -> Option<bool> {
-        match env(key) {
-            Some(e) => match e.to_lowercase().as_str() {
+        match self.layered(key)? {
+            (Layer::Env, Value::String(e)) => match e.to_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => Some(true),
                 "0" | "false" | "no" | "off" => Some(false),
                 _ => None,
             },
-            None => self.table.get(key).and_then(|v| v.as_bool()),
+            (_, v) => v.as_bool(),
         }
     }
 
     pub fn num(&self, key: &str) -> Option<u64> {
-        env(key).and_then(|e| e.parse().ok()).or_else(|| {
-            self.table
-                .get(key)
-                .and_then(|v| v.as_integer())
-                .map(|n| n as u64)
-        })
+        match self.layered(key)? {
+            (Layer::Env, Value::String(e)) => e.parse().ok(),
+            (_, v) => v.as_integer().map(|n| n as u64),
+        }
     }
 
     /// A field of `[providers.<name>]`.
@@ -178,17 +335,36 @@ impl Config {
             .map(str::to_owned)
     }
 
+    /// `tags = [...]` on the provider; `private = true` counts as the tag `private`.
+    pub fn provider_has_tag(&self, name: &str, tag: &str) -> bool {
+        let Some(p) = self.providers.get(name) else {
+            return false;
+        };
+        (tag == "private" && p.get("private").and_then(|v| v.as_bool()) == Some(true))
+            || p.get("tags")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| a.iter().any(|t| t.as_str() == Some(tag)))
+    }
+
+    /// Tags a provider must have: the `tag` setting, plus `private` when private mode is on.
+    pub fn required_tags(&self) -> Vec<String> {
+        let mut t: Vec<String> = self.str("tag").into_iter().collect();
+        if self.bool("private") == Some(true) && !t.iter().any(|x| x == "private") {
+            t.push("private".into());
+        }
+        t
+    }
+
     pub fn provider_names(&self) -> Vec<&String> {
         self.providers.keys().collect()
     }
 
     /// Effective value and where it came from, for `prinia config`.
     pub fn describe(&self, key: &str) -> (String, &'static str) {
-        if let Some(e) = env(key) {
-            return (e, "env");
-        }
-        match self.table.get(key) {
-            Some(v) => (v.to_string(), "config"),
+        match self.layered(key) {
+            Some((Layer::Project, v)) => (v.to_string(), "directory"),
+            Some((Layer::Env, Value::String(e))) => (e, "env"),
+            Some((_, v)) => (v.to_string(), "global"),
             None => ("-".into(), "default"),
         }
     }
@@ -205,13 +381,17 @@ mod tests {
         fs::create_dir_all(&sub).unwrap();
         let global = root.join("global.toml");
         fs::write(&global, "record = false\nmodel = \"g\"\nmax_tokens = 100\n[providers.local]\ntype = \"openai\"\nbase_url = \"http://x/v1\"\n").unwrap();
-        fs::write(root.join(".priniarc"), "model = \"proj\"\nrecrod = true\n").unwrap();
-        fs::write(sub.join(".priniarc"), "record = true\nmodel = 5\n").unwrap();
+        fs::write(
+            root.join(".priniarc"),
+            "cache_ttl = \"proj\"\nrecrod = true\n",
+        )
+        .unwrap();
+        fs::write(sub.join(".priniarc"), "record = true\ncache_ttl = 5\n").unwrap();
 
         let c = Config::load_from(Some(global), &sub);
         assert_eq!(c.bool("record"), Some(true), "nearest file wins");
         assert_eq!(
-            c.str("model").as_deref(),
+            c.str("cache_ttl").as_deref(),
             Some("proj"),
             "a wrongly typed value does not shadow the parent's"
         );
@@ -225,6 +405,45 @@ mod tests {
             Some("http://x/v1")
         );
         assert_eq!(c.provider_str("nope", "type"), None);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn directory_beats_env_beats_global() {
+        let root = std::env::temp_dir().join(format!("prinia-order-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let global = root.join("g.toml");
+        fs::write(&global, "fast_under = 1\ncache_ttl = \"1d\"\n").unwrap();
+        fs::write(root.join(".priniarc"), "fast_under = 2\n").unwrap();
+        // SAFETY: only this test touches these variables
+        unsafe {
+            std::env::set_var("PRINIA_FAST_UNDER", "3");
+            std::env::set_var("PRINIA_CACHE_TTL", "2d");
+        }
+        let c = Config::load_from(Some(global), &root);
+        assert_eq!(c.num("fast_under"), Some(2), "directory beats env");
+        assert_eq!(
+            c.str("cache_ttl").as_deref(),
+            Some("2d"),
+            "env beats global"
+        );
+        unsafe {
+            std::env::remove_var("PRINIA_FAST_UNDER");
+            std::env::remove_var("PRINIA_CACHE_TTL");
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn templates_come_from_the_nearest_directory_and_reject_paths() {
+        let root = std::env::temp_dir().join(format!("prinia-tpl-{}", std::process::id()));
+        let sub = root.join("a");
+        fs::create_dir_all(root.join(".prinia/templates")).unwrap();
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(root.join(".prinia/templates/t"), "do it\n").unwrap();
+        assert_eq!(template("t", &sub).unwrap(), "do it");
+        assert!(template("../t", &sub).is_err());
+        assert!(template("missing-template-xyz", &sub).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
 }
