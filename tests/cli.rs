@@ -565,6 +565,7 @@ fn init_reports_when_there_is_no_model_server_and_writes_nothing() {
     );
 }
 
+#[cfg(unix)]
 /// A tiny release server: `/api` answers like GitHub's "latest release", `/install.sh` is the installer.
 fn release_server(tag: &'static str, installer: &'static str) -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
