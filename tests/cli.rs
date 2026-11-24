@@ -565,6 +565,103 @@ fn init_reports_when_there_is_no_model_server_and_writes_nothing() {
     );
 }
 
+/// A tiny release server: `/api` answers like GitHub's "latest release", `/install.sh` is the installer.
+fn release_server(tag: &'static str, installer: &'static str) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let mut stream = stream.unwrap();
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = if req.starts_with("GET /api") {
+                format!("{{\"tag_name\":\"{tag}\"}}")
+            } else if req.starts_with("GET /install.sh") {
+                installer.to_string()
+            } else {
+                String::new()
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    port
+}
+
+#[cfg(unix)]
+#[test]
+fn update_checks_versions_and_runs_the_installer_only_for_a_self_managed_binary() {
+    let mock = Mock::start("x", 200);
+    let env = Env::new("update", &mock);
+    let marker = env.dir.join("bin/marker");
+    let port = release_server(
+        "v99.0.0",
+        "echo \"ran in $PRINIA_INSTALL_DIR\" > \"$PRINIA_INSTALL_DIR/marker\"\n",
+    );
+    let api = format!("http://127.0.0.1:{port}/api");
+    let base = format!("http://127.0.0.1:{port}");
+    let env_vars = [
+        ("PRINIA_RELEASES_API", api.as_str()),
+        ("PRINIA_DOWNLOAD_URL", base.as_str()),
+    ];
+
+    // --check only compares versions, from the real (development-build) path
+    let (out, err, code) = env.run(&["update", "--check"], "", &env_vars);
+    assert!(
+        code == 0 && out.contains("v99.0.0 is available"),
+        "{out} {err}"
+    );
+    // a development build is not self-updated
+    let (_, err, code) = env.run(&["update"], "", &env_vars);
+    assert!(code != 0 && err.contains("development build"), "{err}");
+
+    // a copy outside any package manager or build tree is updated in place by the installer
+    std::fs::create_dir_all(env.dir.join("bin")).unwrap();
+    let copy = env.dir.join("bin/prinia");
+    std::fs::copy(env!("CARGO_BIN_EXE_prinia"), &copy).unwrap();
+    let run_copy = |extra: &[(&str, &str)]| {
+        Command::new(&copy)
+            .args(["update"])
+            .env_clear()
+            .envs(windows_basics())
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .envs(extra.iter().copied())
+            .output()
+            .unwrap()
+    };
+    let out = run_copy(&env_vars);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ran = std::fs::read_to_string(&marker).unwrap();
+    assert!(ran.contains("bin"), "{ran}");
+
+    // when the installer fails, the user is told nothing changed
+    let bad_port = release_server("v99.0.0", "exit 3\n");
+    let bad_base = format!("http://127.0.0.1:{bad_port}");
+    let bad_api = format!("http://127.0.0.1:{bad_port}/api");
+    let out = run_copy(&[
+        ("PRINIA_RELEASES_API", &bad_api),
+        ("PRINIA_DOWNLOAD_URL", &bad_base),
+    ]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("prinia was not changed"));
+
+    // already current: nothing to do
+    let same = release_server(concat!("v", env!("CARGO_PKG_VERSION")), "exit 9\n");
+    let same_api = format!("http://127.0.0.1:{same}/api");
+    let out = run_copy(&[("PRINIA_RELEASES_API", &same_api)]);
+    assert!(
+        out.status.success() && String::from_utf8_lossy(&out.stdout).contains("latest release")
+    );
+}
+
 #[test]
 fn many_first_calls_at_once_share_one_key() {
     let mock = Mock::start("answer", 200);

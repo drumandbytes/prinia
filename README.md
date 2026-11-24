@@ -67,6 +67,7 @@ prinia --no-cache "..."              # ask again even if the call is in your his
 prinia --no-record "..."             # don't save this call
 
 prinia init                          # pick a local model for this machine and write the config
+prinia update [--check]              # update prinia (curl-installed binaries; brew users: brew upgrade)
 prinia trust                         # allow this repo's .priniarc to turn on run/write/agent
 prinia history                       # browse everything you asked (fzf when available)
 prinia history search kestrel        # find turns by words in prompt, input or answer

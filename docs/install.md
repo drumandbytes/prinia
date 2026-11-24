@@ -18,6 +18,19 @@ The script picks the release for your OS and architecture, verifies it against t
 | `PRINIA_INSTALL_DIR=/usr/local/bin` | Install somewhere else |
 | `PRINIA_DOWNLOAD_URL=...` | Download from a mirror |
 
+## Updating
+
+```bash
+prinia update --check     # is a newer release out?
+prinia update             # install it in place
+```
+
+`prinia update` downloads the installer from the latest release and runs it into the folder the current binary lives in, so it does exactly what the install script does, including the checksum check; the installer is the only copy of that logic. Nothing is checked or downloaded unless you run the command.
+
+It refuses for a binary installed by Homebrew or cargo (use `brew upgrade prinia` or `cargo install`) and for a development build. It is not available on Windows. Running the install script again always works as well, for any version.
+
+Note that the checksum comes from the same release as the binary: it catches a corrupt download, not a compromised release.
+
 ## Homebrew
 
 ```bash

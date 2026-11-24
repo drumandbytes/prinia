@@ -22,6 +22,7 @@ mod retrieve;
 mod sh;
 mod stats;
 mod store;
+mod update;
 
 const PROMPT_PIPE: &str = "You are a command-line tool in a UNIX pipeline. Output ONLY the raw text or data requested. No markdown, no code fences, no greetings, no commentary.";
 const PROMPT_INTERACTIVE: &str = "You are an inline terminal companion. Answer directly, no pleasantries. Keep it under 15 lines unless asked for more. Prefer commands, snippets and paths over background.";
@@ -158,6 +159,12 @@ enum Cmd {
         #[arg(long)]
         summarize: bool,
     },
+    /// Update prinia to the latest release (not for Homebrew or cargo installs)
+    Update {
+        /// Only say whether a newer release exists
+        #[arg(long)]
+        check: bool,
+    },
     /// Find a local model server, pick a model for this machine and write the config
     Init,
     /// Print the shell integration to load: `eval "$(prinia shell zsh)"`
@@ -281,6 +288,7 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
+        Some(Cmd::Update { check }) => update::run(*check),
         Some(Cmd::Init) => init::run(),
         Some(Cmd::Shell { .. }) => {
             print!("{}", include_str!("../scripts/prinia.zsh"));

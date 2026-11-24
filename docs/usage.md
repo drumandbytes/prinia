@@ -154,6 +154,7 @@ Every successful call is saved to the [history](history.md) after its output has
 | Command | |
 | :--- | :--- |
 | `prinia config` | Show every setting and where its value comes from |
+| `prinia update [--check]` | Update prinia to the latest release ([Install](install.md#updating)) |
 | `prinia init` | Find Ollama, pick a model for this machine, write the config |
 | `prinia trust` | Review and trust this project's `.priniarc` ([Configuration](configuration.md)) |
 | `prinia context [QUESTION]` | Show what `-c` would send; `--summarize` builds summaries now |
