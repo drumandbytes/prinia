@@ -54,10 +54,12 @@ fn call(cfg: &Config, tier: Tier, system: &str, user: &str, show: bool) -> Resul
 }
 
 fn scan(store: &Store, f: &FilterArgs, cfg: &Config) -> Result<Vec<Turn>> {
-    let turns = store.list(
+    let provider = Provider::resolve(cfg, None)?;
+    let mut turns = store.list(
         &f.filter()?,
         cfg.num("history_scan").unwrap_or(200) as usize,
     )?;
+    turns.retain(|t| provider.may_see(cfg, &t.provider));
     if turns.is_empty() {
         bail!("the history has no matching turns");
     }
@@ -116,12 +118,15 @@ pub fn ask(store: &Store, cfg: &Config, f: &FilterArgs, question: &str) -> Resul
         filter.older = older;
         guessed = true;
     }
+    let provider = Provider::resolve(cfg, None)?;
     let mut turns = store.list(&filter, 20_000)?;
+    turns.retain(|t| provider.may_see(cfg, &t.provider));
     if turns.is_empty() && guessed {
         eprintln!("[prinia] nothing in that time range; searching all of the history");
         filter.since = None;
         filter.older = None;
         turns = store.list(&filter, 20_000)?;
+        turns.retain(|t| provider.may_see(cfg, &t.provider));
     }
     if turns.is_empty() {
         bail!("the history has no matching turns");

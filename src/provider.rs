@@ -181,6 +181,12 @@ impl Provider {
         })
     }
 
+    /// Whether this provider may be shown a turn made with `made_with`: turns from a provider
+    /// tagged `private` only go to another provider tagged `private`.
+    pub fn may_see(&self, cfg: &Config, made_with: &str) -> bool {
+        cfg.provider_has_tag(&self.name, "private") || !cfg.provider_has_tag(made_with, "private")
+    }
+
     /// The provider's own table wins over the top-level setting, then the built-in default.
     pub fn model(&self, cfg: &Config, tier: Tier) -> Result<String> {
         let builtin = match (self.kind, tier) {
@@ -283,11 +289,15 @@ impl Provider {
             model: req.model.to_string(),
             ..Default::default()
         };
+        let mut done = false;
         for line in BufReader::new(resp.into_body().into_reader()).lines() {
             let line = line.context("the response stream broke off")?;
             let Some(data) = line.strip_prefix("data:").map(str::trim) else {
                 continue;
             };
+            if data == "[DONE]" {
+                done = true;
+            }
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
@@ -303,7 +313,8 @@ impl Provider {
                 reply.text.push_str(&t);
             }
         }
-        if reply.stop.is_empty() {
+        // a finish reason or the closing `[DONE]` marks a complete answer; a dropped connection has neither
+        if reply.stop.is_empty() && !done {
             bail!("the response ended before the model finished (connection dropped?)");
         }
         reply.calls = reply

@@ -1,6 +1,6 @@
 use serde_json::Value;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Whether `text` satisfies `--json` (parses as one JSON value) and `--check` (the command
 /// reads it on stdin and exits 0).
@@ -10,16 +10,7 @@ pub fn passes(text: &str, json: bool, cmd: Option<&str>) -> bool {
 }
 
 fn run(cmd: &str, text: &str) -> bool {
-    let mut c = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", cmd]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", cmd]);
-        c
-    };
-    let Ok(mut child) = c
+    let Ok(mut child) = crate::sh::command(cmd)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -101,7 +101,10 @@ pub fn run() -> Result<()> {
         }
         return Ok(());
     };
-    let gb = memory_gb().unwrap_or(8);
+    let gb = memory_gb().unwrap_or_else(|| {
+        println!("Could not read this machine's memory size; assuming 8 GB (a small model).");
+        8
+    });
     let (model, size, deep) = recommend(gb);
     println!(
         "Ollama is running; this machine has about {gb} GB of memory. Recommended: {model}{}.",

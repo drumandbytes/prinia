@@ -19,6 +19,7 @@ mod key;
 mod keychain;
 mod provider;
 mod retrieve;
+mod sh;
 mod stats;
 mod store;
 
@@ -260,6 +261,7 @@ fn run() -> Result<()> {
                     older: cfg.num("context_older").unwrap_or(30) as usize,
                     query: question.as_deref().unwrap_or(""),
                     relevant: cfg.num("context_relevant").unwrap_or(3) as usize,
+                    visible: &|t| provider.may_see(&cfg, &t.provider),
                     summary: on.then(|| context::Summary {
                         provider: &provider,
                         model: &model,
@@ -623,6 +625,7 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
                 older: cfg.num("context_older").unwrap_or(30) as usize,
                 query: &user,
                 relevant: cfg.num("context_relevant").unwrap_or(3) as usize,
+                visible: &|t| provider.may_see(cfg, &t.provider),
                 summary: (cfg.bool("context_summary") == Some(true)).then(|| context::Summary {
                     provider: &provider,
                     model: &summary_model,
@@ -817,6 +820,10 @@ fn strip_fence(s: &str) -> String {
 }
 
 fn git_info(cwd: &Path) -> (Option<String>, Option<String>) {
+    // no `.git` above: skip the two process spawns
+    if !cwd.ancestors().any(|d| d.join(".git").exists()) {
+        return (None, None);
+    }
     let run = |args: &[&str]| {
         Command::new("git")
             .arg("-C")

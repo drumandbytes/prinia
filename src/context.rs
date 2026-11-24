@@ -23,6 +23,8 @@ pub struct Params<'a> {
     /// The new question; older turns that match its words are included in full.
     pub query: &'a str,
     pub relevant: usize,
+    /// Which turns this call may show to its provider (see `Provider::may_see`).
+    pub visible: &'a dyn Fn(&Turn) -> bool,
     /// Summarize older blocks with this provider and model (the call's own, so privacy rules hold).
     pub summary: Option<Summary<'a>>,
 }
@@ -120,7 +122,8 @@ pub fn build(store: &Store, p: &Params) -> Result<Vec<(String, String)>> {
     } else {
         p.verbatim + p.older
     };
-    let turns = store.list(&filter, limit)?; // newest first
+    let mut turns = store.list(&filter, limit)?; // newest first
+    turns.retain(|t| (p.visible)(t));
 
     // tier 1: newest turns word for word, within the character budget
     let mut used = 0;

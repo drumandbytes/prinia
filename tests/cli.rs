@@ -11,6 +11,10 @@ enum Step {
     Text(&'static str),
     /// text, ended by the output limit (OpenAI-style `length`)
     Cut(&'static str),
+    /// text with no finish reason, closed by `[DONE]`
+    NoFinish(&'static str),
+    /// text with no finish reason and no `[DONE]`: a dropped connection
+    Dropped(&'static str),
     /// tool name, arguments as JSON text
     Call(&'static str, &'static str),
 }
@@ -94,7 +98,9 @@ impl Mock {
                     )
                 } else {
                     let shown = match &step {
-                        Some(Step::Text(t)) | Some(Step::Cut(t)) => *t,
+                        Some(
+                            Step::Text(t) | Step::Cut(t) | Step::NoFinish(t) | Step::Dropped(t),
+                        ) => *t,
                         _ => text,
                     };
                     let (a, b) = shown.split_at(shown.len() / 2);
@@ -115,15 +121,19 @@ impl Mock {
                     } else {
                         format!(
                             "data: {{\"model\":\"served-model\",\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n\
-                             data: {{\"model\":\"served-model\",\"choices\":[{{\"delta\":{{\"content\":{}}},\"finish_reason\":\"{}\"}}]}}\n\n\
-                             data: {{\"model\":\"served-model\",\"choices\":[],\"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":3}}}}\n\n\
-                             data: [DONE]\n\n",
+                             data: {{\"model\":\"served-model\",\"choices\":[{{\"delta\":{{\"content\":{}}},\"finish_reason\":{}}}]}}\n\n\
+                             data: {{\"model\":\"served-model\",\"choices\":[],\"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":3}}}}\n\n{}",
                             q(a),
                             q(b),
-                            if matches!(step, Some(Step::Cut(_))) {
-                                "length"
+                            match step {
+                                Some(Step::Cut(_)) => "\"length\"",
+                                Some(Step::NoFinish(_) | Step::Dropped(_)) => "null",
+                                _ => "\"stop\"",
+                            },
+                            if matches!(step, Some(Step::Dropped(_))) {
+                                ""
                             } else {
-                                "stop"
+                                "data: [DONE]\n\n"
                             }
                         )
                     };
@@ -420,6 +430,50 @@ fn context_pulls_in_older_turns_that_match_the_new_question() {
             .to_string()
             .contains("rotate the payments")
     );
+}
+
+#[test]
+fn a_dropped_stream_is_an_error_but_done_without_a_finish_reason_is_complete() {
+    let mock = Mock::start_with("", 200, vec![Step::Dropped("half an ans")]);
+    let env = Env::new("dropped", &mock);
+    let (out, err, code) = env.run(&["-p", "local", "q"], "", &[]);
+    assert!(
+        code != 0 && out.is_empty() && err.contains("ended before"),
+        "{out:?} {err}"
+    );
+    let (shown, _, _) = env.run(&["history", "show", "1"], "", &[]);
+    assert!(
+        !shown.contains("half an ans"),
+        "a cut-off answer must not be saved"
+    );
+
+    let mock = Mock::start_with("", 200, vec![Step::NoFinish("whole answer")]);
+    let env = Env::new("no-finish", &mock);
+    let (out, err, code) = env.run(&["-p", "local", "q"], "", &[]);
+    assert_eq!((out.as_str(), code), ("whole answer\n", 0), "{err}");
+}
+
+#[test]
+fn turns_from_a_private_provider_are_not_sent_to_another_one() {
+    let mock = Mock::start("an answer", 200);
+    let env = Env::new("private-turns", &mock);
+    let cfg = env.dir.join("cfg/config.toml");
+    let text = std::fs::read_to_string(&cfg).unwrap().replace(
+        "type = \"openai\"",
+        "type = \"openai\"\ntags = [\"private\"]",
+    );
+    std::fs::write(&cfg, text).unwrap();
+    env.run(&["-p", "local", "secret roadmap question"], "", &[]);
+    let ctx = [("PRINIA_CONTEXT", "5")];
+    // a private provider sees it; the cloud one does not
+    env.run(&["-p", "local", "-c", "follow up"], "", &ctx);
+    assert!(mock.last().1.to_string().contains("secret roadmap"));
+    env.run(&["-p", "anthropic", "-c", "follow up"], "", &ctx);
+    assert!(!mock.last().1.to_string().contains("secret roadmap"));
+    // `history ask` goes to the default (cloud) provider: the private turn must not be in it
+    let (_, err, code) = env.run(&["history", "ask", "what was the roadmap"], "", &[]);
+    assert_eq!(code, 0, "{err}");
+    assert!(!mock.last().1.to_string().contains("secret roadmap"));
 }
 
 #[test]

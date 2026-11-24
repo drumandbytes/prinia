@@ -113,9 +113,24 @@ fn arg<'a>(a: &'a Value, k: &str) -> Result<&'a str> {
         .ok_or_else(|| anyhow!("missing text argument `{k}`"))
 }
 
+const MAX_FILE: u64 = 10_000_000;
+
+/// A regular text file of a sane size: a named pipe would block forever and a huge file would
+/// be loaded whole before any cut.
+fn text_of(path: &Path) -> Result<String> {
+    let m = std::fs::metadata(path)?;
+    if !m.is_file() {
+        bail!("not a regular file");
+    }
+    if m.len() > MAX_FILE {
+        bail!("the file is larger than 10 MB; read part of it with `search`");
+    }
+    std::fs::read_to_string(path).map_err(|e| anyhow!("cannot read as text: {e}"))
+}
+
 fn read_file(root: &Path, a: &Value) -> Result<String> {
     let path = resolve(root, arg(a, "path")?)?;
-    let text = std::fs::read_to_string(&path).map_err(|e| anyhow!("cannot read as text: {e}"))?;
+    let text = text_of(&path)?;
     let start = a["start"].as_u64().unwrap_or(1).max(1) as usize;
     let end = a["end"].as_u64().map(|e| e as usize).unwrap_or(usize::MAX);
     let out: Vec<String> = text
@@ -165,7 +180,8 @@ fn walk(dir: &Path, needle: &str, out: &mut Vec<String>, root: &Path) {
             if name != "target" && name != "node_modules" {
                 walk(&path, needle, out, root);
             }
-        } else if e.metadata().map(|m| m.len() < 1_000_000).unwrap_or(false)
+        } else if ft.is_file()
+            && e.metadata().map(|m| m.len() < 1_000_000).unwrap_or(false)
             && let Ok(text) = std::fs::read_to_string(&path)
         {
             let rel = path.strip_prefix(root).unwrap_or(&path).display();
@@ -186,7 +202,7 @@ fn search(root: &Path, a: &Value) -> Result<String> {
     let needle = arg(a, "pattern")?.to_lowercase();
     let mut out = Vec::new();
     if start.is_file() {
-        let text = std::fs::read_to_string(&start)?;
+        let text = text_of(&start)?;
         for (i, l) in text.lines().enumerate() {
             if l.to_lowercase().contains(&needle) {
                 out.push(format!(
@@ -231,13 +247,12 @@ fn replace(root: &Path, a: &Value) -> Result<String> {
 /// True for a pipeline of read-only commands. Anything with shell syntax beyond `|` (chaining,
 /// substitution, redirects, background) or a flag that can write or execute needs approval.
 fn read_only(cmd: &str) -> bool {
+    // No `git` (a repository's own config can make `git status` or `git diff` run a program),
+    // no `hostname`/`uniq`/`sort -o` style commands that write.
     const OK: &[&str] = &[
-        "ls", "cat", "head", "tail", "wc", "date", "pwd", "echo", "grep", "rg", "sort", "uniq",
-        "du", "df", "which", "whoami", "uname", "file", "stat", "tree", "find", "git", "basename",
-        "dirname", "uptime", "hostname",
-    ];
-    const GIT: &[&str] = &[
-        "status", "log", "diff", "show", "branch", "ls-files", "remote",
+        "ls", "cat", "head", "tail", "wc", "date", "pwd", "echo", "grep", "rg", "sort", "du", "df",
+        "which", "whoami", "uname", "file", "stat", "tree", "find", "basename", "dirname",
+        "uptime",
     ];
     if cmd.contains([';', '&', '`', '$', '(', ')', '<', '>', '\n', '\\']) {
         return false;
@@ -247,17 +262,18 @@ fn read_only(cmd: &str) -> bool {
         let Some(&first) = w.first() else {
             return false;
         };
+        // flags that write a file or run a program
         let bad_flag = w.iter().any(|a| {
             matches!(
                 *a,
-                "-exec" | "-execdir" | "-ok" | "-delete" | "-o" | "--pre"
+                "-exec" | "-execdir" | "-ok" | "-okdir" | "-delete" | "-o" | "-fls"
             ) || a.starts_with("-fprint")
                 || a.starts_with("--output")
-                || a.starts_with("--pre=")
+                || a.starts_with("--pre")
+                || a.starts_with("--compress-program")
+                || a.starts_with("--hostname-bin")
         });
-        OK.contains(&first)
-            && !bad_flag
-            && (first != "git" || w.get(1).is_some_and(|s| GIT.contains(s)))
+        OK.contains(&first) && !bad_flag
     })
 }
 
@@ -285,15 +301,7 @@ fn run_command(root: &Path, a: &Value, yes: bool) -> Result<String> {
                 .into(),
         );
     }
-    let mut c = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", &format!("({cmd}) 2>&1")]);
-        c
-    } else {
-        let mut c = Command::new("sh");
-        c.args(["-c", &format!("({cmd}) 2>&1")]);
-        c
-    };
+    let mut c = crate::sh::command(&format!("({cmd}) 2>&1"));
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut c, 0);
     let mut child = c
@@ -435,7 +443,7 @@ mod tests {
         for ok in [
             "ls -la",
             "find . -name '*.rs' | wc -l",
-            "git log --oneline | head",
+            "cat a | sort | head",
             "echo hi",
         ] {
             assert!(read_only(ok), "{ok}");
@@ -452,6 +460,13 @@ mod tests {
             "ls || id",
             "rg --pre ./x foo",
             "sort -o f f",
+            "git status",
+            "git remote set-url origin x",
+            "git branch -D main",
+            "uniq in out",
+            "sort --compress-program=sh f",
+            "rg --hostname-bin=sh x",
+            "find . -fls out",
             "ls &",
         ] {
             assert!(!read_only(no), "{no}");
@@ -474,5 +489,20 @@ mod tests {
         std::os::unix::fs::symlink("/nonexistent-outside/new", &link).unwrap();
         assert!(resolve(&root, "link").is_err());
         let _ = std::fs::remove_file(&link);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_is_not_read() {
+        let p = std::env::temp_dir().join(format!("prinia-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        if Command::new("mkfifo")
+            .arg(&p)
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            assert!(text_of(&p).is_err());
+            let _ = std::fs::remove_file(&p);
+        }
     }
 }
