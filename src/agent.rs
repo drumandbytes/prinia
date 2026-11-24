@@ -279,7 +279,7 @@ fn approve(cmd: &str) -> bool {
 
 fn run_command(root: &Path, a: &Value, yes: bool) -> Result<String> {
     let cmd = arg(a, "command")?;
-    if !yes && !read_only(&cmd) && !approve(&cmd) {
+    if !yes && !read_only(cmd) && !approve(cmd) {
         return Ok(
             "[not run: the user did not approve this command, or there is no terminal to ask on]"
                 .into(),

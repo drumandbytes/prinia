@@ -212,14 +212,16 @@ impl Config {
                 }
             };
             for (k, v) in t {
-                if !global && k != "providers" && !PROJECT.contains(&k.as_str()) {
-                    if KEYS.iter().any(|(n, _)| *n == k) {
-                        eprintln!(
-                            "[prinia] {}: `{k}` is device-level; set it in your global config",
-                            p.display()
-                        );
-                        continue;
-                    }
+                if !global
+                    && k != "providers"
+                    && !PROJECT.contains(&k.as_str())
+                    && KEYS.iter().any(|(n, _)| *n == k)
+                {
+                    eprintln!(
+                        "[prinia] {}: `{k}` is device-level; set it in your global config",
+                        p.display()
+                    );
+                    continue;
                 }
                 // a repo may always tighten (`run = false`); loosening needs trust
                 if !trusted && RISKY.contains(&k.as_str()) && v != Value::Boolean(false) {

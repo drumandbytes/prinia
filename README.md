@@ -56,6 +56,7 @@ cmd | prinia "instruction" | cmd2    # a pipeline step
 prinia -f "..."                      # fast tier
 prinia -d "..."                      # reasoning tier
 prinia -p local "..."                # a configured provider
+cat list.txt | prinia --each "..."      # one call per line, in parallel (-j N)
 prinia -t NAME "..."                 # a saved instruction (docs/usage.md#templates)
 prinia --cmd "..."                   # one shell command; `eval "$(prinia shell zsh)"` binds it to ctrl-g
 prinia -x "..."                     # let the model run commands to answer (agent + --run)
@@ -64,6 +65,8 @@ prinia -c "..."                     # include earlier turns from this directory
 prinia --no-cache "..."              # ask again even if the call is in your history
 prinia --no-record "..."             # don't save this call
 
+prinia init                          # pick a local model for this machine and write the config
+prinia trust                         # allow this repo's .priniarc to turn on run/write/agent
 prinia history                       # browse everything you asked (fzf when available)
 prinia history search kestrel        # find turns by words in prompt, input or answer
 prinia history ask "what did I ask about TLS?"   # a fast model answers from your history
