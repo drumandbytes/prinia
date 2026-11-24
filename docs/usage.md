@@ -107,7 +107,7 @@ git diff | prinia -t commit "mention the ticket ABC-12"   # extra words are adde
 eval "$(prinia shell zsh)"     # add to ~/.zshrc
 ```
 
-Type what you want in plain words and press ctrl-g (`PRINIA_WIDGET_KEY` changes the key). The line is replaced by one shell command, which you can edit; nothing runs until you press enter. The model is told your shell and OS and which of `rg`, `fd`, `jq` and `yq` are installed. `prinia --cmd "..."` does the same without the widget. Answers from small local models can be wrong, so read the command before running it.
+Type what you want in plain words and press ctrl-g. It is bound in emacs mode and in both vi modes. Set `PRINIA_WIDGET_KEY` before the `eval` line to change it, or to use several keys: `export PRINIA_WIDGET_KEY='^x^p ^n'` (zsh key notation; `^g` is ctrl-g). To free ctrl-g again, rebind it after the `eval`: `bindkey '^g' list-expand`. The line is replaced by one shell command, which you can edit; nothing runs until you press enter. The model is told your shell and OS and which of `rg`, `fd`, `jq` and `yq` are installed. `prinia --cmd "..."` does the same without the widget. Answers from small local models can be wrong, so read the command before running it.
 
 ## Checking the answer
 
