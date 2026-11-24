@@ -104,11 +104,29 @@ impl Provider {
     /// `--provider`, then the `provider` setting, then whichever built-in has its API key set.
     pub fn resolve(cfg: &Config, flag: Option<&str>) -> Result<Provider> {
         let has = |v: &str| std::env::var(v).is_ok_and(|k| !k.is_empty());
-        let name = match flag.map(str::to_owned).or_else(|| cfg.str("provider")) {
-            Some(n) => n,
-            None if has("ANTHROPIC_API_KEY") => "anthropic".into(),
-            None if has("OPENAI_API_KEY") => "openai".into(),
-            None => bail!(
+        let need = cfg.required_tags();
+        let tagged = |n: &str| need.iter().all(|t| cfg.provider_has_tag(n, t));
+        let default = cfg.str("provider");
+        let name = match (flag, default) {
+            (Some(n), _) => n.to_owned(),
+            (None, Some(n)) if tagged(&n) => n,
+            // a project asked for a tag: the first provider (by name) that has it
+            _ if !need.is_empty() => cfg
+                .provider_names()
+                .into_iter()
+                .find(|n| tagged(n))
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "no provider has the tag(s) {}; add `tags = [\"{}\"]` under a [providers.<name>] in your global config",
+                        need.join(", "),
+                        need[0]
+                    )
+                })?,
+            (None, Some(n)) => n,
+            (None, None) if has("ANTHROPIC_API_KEY") => "anthropic".into(),
+            (None, None) if has("OPENAI_API_KEY") => "openai".into(),
+            (None, None) => bail!(
                 "no provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or add one to the config, e.g. a local model:\n\n  provider = \"local\"\n  [providers.local]\n  type = \"openai\"\n  base_url = \"http://localhost:11434/v1\"\n  model = \"llama3.2\""
             ),
         };
@@ -149,11 +167,10 @@ impl Provider {
         if api_key.is_none() && official {
             bail!("provider `{name}` needs an API key in ${key_env}");
         }
-        // `private = true` (a directory, or your global config) allows only providers you marked
-        // `private = true`: a local model, or a hosted one covered by your own agreement.
-        if cfg.bool("private") == Some(true) && cfg.provider_bool(&name, "private") != Some(true) {
+        if !tagged(&name) {
             bail!(
-                "private mode is on, but provider `{name}` is not marked private; use one with `private = true` under [providers.<name>] in your global config (-p NAME), or turn `private` off"
+                "provider `{name}` lacks the required tag(s) {}; pick one that has them (-p NAME) or change the `tag` / `private` setting",
+                need.join(", ")
             );
         }
         Ok(Provider {

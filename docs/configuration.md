@@ -22,29 +22,35 @@ A `.priniarc` holds behaviour only: `record`, `cache`, `cache_ttl`, `context`, `
 
 Settings that let the model act on your machine or change what it is told (`run`, `write`, `agent`, `prompt_pipe`, `prompt_interactive`) are ignored in a project file until you read it and run `prinia trust`. Turning `run`, `write` or `agent` off needs no trust. Trust is tied to the file's exact contents, so any later change, such as from a `git pull`, needs trusting again. Your own global config is always trusted.
 
-### Private mode
+### Tags and private mode
 
-A provider can be marked `private = true` in your global config: a local model, or a hosted one you use under your own agreement (a company API key with the right terms). Then `private = true` as a setting, in a `.priniarc` or your global config, makes prinia refuse every provider that is not marked, before anything is sent. Built-in `anthropic` and `openai` are not private unless you define `[providers.anthropic]` with `private = true`.
+Providers can carry tags, and a project asks for a tag instead of naming a provider. The device decides which provider that means, so the same `.priniarc` works on every machine.
 
 ```toml
 # ~/.config/prinia/config.toml
+provider = "local"
+
 [providers.local]
 type = "openai"
 base_url = "http://localhost:11434/v1"
-private = true
+tags = ["private"]
 
 [providers.corp]               # a company key covered by an NDA
 type = "anthropic"
 api_key_env = "CORP_ANTHROPIC_KEY"
-private = true
+tags = ["private", "work"]
 ```
 
 ```toml
-# .priniarc in a confidential repository
-private = true                 # only local / `private` providers, whatever your shell exports
+# .priniarc
+tag = "work"                   # use a provider tagged "work" (your default if it has the tag, else the first by name)
 ```
 
-`prinia init` marks the local model private. Only a project file or your own config can switch it on, and it only ever restricts. The check covers every call, including `history ask` and agent mode.
+- `tag = "NAME"` (project or global setting) makes prinia use a provider with that tag. If none has it, the call fails; there is no fallback to another provider. `-p NAME` must name a provider with the tag, or it is refused before anything is sent.
+- `private` is a tag with shorthand: `private = true` on a provider means `tags = ["private"]`, and `private = true` as a setting requires that tag. It combines with `tag`, so a project can need both `work` and `private`.
+- Built-in `anthropic` and `openai` have no tags unless you define `[providers.anthropic]` with them.
+- Tags mean what you decide. prinia cannot check that a provider is covered by an agreement; marking it `private` is your statement that it is.
+- The check covers every call, including `history ask` and agent mode. `prinia init` tags the local model `private`.
 
 A `.priniarc` is how a project gets its own behaviour: a repository that should never be recorded says `record = false`, one that must never run commands says `run = false`.
 

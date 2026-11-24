@@ -38,6 +38,7 @@ pub const KEYS: &[(&str, Ty)] = &[
     ("run", Ty::Bool),
     ("max_input", Ty::Num),
     ("private", Ty::Bool),
+    ("tag", Ty::Str),
     ("agent_steps", Ty::Num),
     ("check_retries", Ty::Num),
     ("keychain", Ty::Bool),
@@ -66,6 +67,7 @@ const PROJECT: &[&str] = &[
     "check_retries",
     "max_input",
     "private",
+    "tag",
     "agent",
     "agent_steps",
     "run",
@@ -320,8 +322,24 @@ impl Config {
             .map(str::to_owned)
     }
 
-    pub fn provider_bool(&self, name: &str, field: &str) -> Option<bool> {
-        self.providers.get(name)?.get(field)?.as_bool()
+    /// `tags = [...]` on the provider; `private = true` counts as the tag `private`.
+    pub fn provider_has_tag(&self, name: &str, tag: &str) -> bool {
+        let Some(p) = self.providers.get(name) else {
+            return false;
+        };
+        (tag == "private" && p.get("private").and_then(|v| v.as_bool()) == Some(true))
+            || p.get("tags")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| a.iter().any(|t| t.as_str() == Some(tag)))
+    }
+
+    /// Tags a provider must have: the `tag` setting, plus `private` when private mode is on.
+    pub fn required_tags(&self) -> Vec<String> {
+        let mut t: Vec<String> = self.str("tag").into_iter().collect();
+        if self.bool("private") == Some(true) && !t.iter().any(|x| x == "private") {
+            t.push("private".into());
+        }
+        t
     }
 
     pub fn provider_names(&self) -> Vec<&String> {

@@ -342,13 +342,38 @@ fn private_mode_allows_only_providers_marked_private() {
     for p in ["local", "anthropic"] {
         let (_, err, code) = env.run(&["-p", p, "q"], "", &[("PRINIA_PRIVATE", "0")]);
         assert!(
-            code != 0 && err.contains("not marked private"),
+            code != 0 && err.contains("lacks the required tag"),
             "{p}: {err}"
         );
     }
     assert_eq!(mock.hits(), 0, "nothing was sent");
     let (out, err, code) = env.run(&["-p", "corp", "q"], "", &[]);
     assert_eq!((out.as_str(), code), ("ok\n", 0), "{err}");
+}
+
+#[test]
+fn a_project_tag_picks_the_provider_that_has_it() {
+    let mock = Mock::start("tagged", 200);
+    let env = Env::new("tags", &mock);
+    let cfg = env.dir.join("cfg/config.toml");
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!(
+        "\n[providers.work]\ntype = \"openai\"\nbase_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"m\"\ntags = [\"work\", \"eu\"]\n",
+        mock.port
+    ));
+    std::fs::write(&cfg, text).unwrap();
+    std::fs::write(env.dir.join("work/.priniarc"), "tag = \"work\"\n").unwrap();
+    // no -p and no `provider` setting: the tag chooses
+    let (out, err, code) = env.run(&["q"], "", &[]);
+    assert_eq!((out.as_str(), code), ("tagged\n", 0), "{err}");
+    let (_, err, code) = env.run(&["-p", "local", "q"], "", &[]);
+    assert!(code != 0 && err.contains("lacks the required tag"), "{err}");
+    std::fs::write(env.dir.join("work/.priniarc"), "tag = \"nobody\"\n").unwrap();
+    let (_, err, code) = env.run(&["q"], "", &[]);
+    assert!(
+        code != 0 && err.contains("no provider has the tag"),
+        "{err}"
+    );
 }
 
 #[test]
