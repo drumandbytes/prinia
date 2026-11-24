@@ -31,6 +31,21 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
 
+  # Windows is not supported yet: this job shows whether it builds and which tests fail,
+  # without blocking a merge (it is not in required-checks-passed).
+  test-windows:
+    name: Test (windows-latest, informational)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
   # The installer is piped into sh on users' machines.
   shell:
     name: Shell scripts

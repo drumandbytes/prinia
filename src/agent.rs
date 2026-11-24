@@ -277,19 +277,28 @@ fn read_only(cmd: &str) -> bool {
     })
 }
 
-/// Asks on the terminal; with no terminal the answer is no.
+/// Asks on the terminal, even when stdin and stdout are pipes; with no terminal the answer is no.
 fn approve(cmd: &str) -> bool {
     use std::io::{BufRead, Write};
-    let Ok(mut tty) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-    else {
+    // the console device: one file on Unix, separate input and output handles on Windows
+    let (input, output) = if cfg!(windows) {
+        ("CONIN$", "CONOUT$")
+    } else {
+        ("/dev/tty", "/dev/tty")
+    };
+    let open = |path: &str, write: bool| {
+        std::fs::OpenOptions::new()
+            .read(!write)
+            .write(write)
+            .open(path)
+    };
+    let (Ok(mut out), Ok(inp)) = (open(output, true), open(input, false)) else {
         return false;
     };
-    let _ = write!(tty, "[prinia] run `{cmd}`? [y/N] ");
+    let _ = write!(out, "[prinia] run `{cmd}`? [y/N] ");
+    let _ = out.flush();
     let mut line = String::new();
-    let _ = std::io::BufReader::new(&tty).read_line(&mut line);
+    let _ = std::io::BufReader::new(inp).read_line(&mut line);
     line.trim().eq_ignore_ascii_case("y")
 }
 
@@ -321,10 +330,16 @@ fn run_command(root: &Path, a: &Value, yes: bool) -> Result<String> {
             break Some(s);
         }
         if started.elapsed() > Duration::from_secs(60) {
-            // kill the group, or a background grandchild keeps the output pipe open
+            // kill the whole tree, or a background grandchild keeps the output pipe open
             #[cfg(unix)]
             let _ = Command::new("kill")
                 .args(["-KILL", &format!("-{}", child.id())])
+                .status();
+            #[cfg(windows)]
+            let _ = Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &child.id().to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status();
             let _ = child.kill();
             let _ = child.wait();
