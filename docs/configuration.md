@@ -22,6 +22,30 @@ A `.priniarc` holds behaviour only: `record`, `cache`, `cache_ttl`, `context`, `
 
 Settings that let the model act on your machine or change what it is told (`run`, `write`, `agent`, `prompt_pipe`, `prompt_interactive`) are ignored in a project file until you read it and run `prinia trust`. Turning `run`, `write` or `agent` off needs no trust. Trust is tied to the file's exact contents, so any later change, such as from a `git pull`, needs trusting again. Your own global config is always trusted.
 
+### Private mode
+
+A provider can be marked `private = true` in your global config: a local model, or a hosted one you use under your own agreement (a company API key with the right terms). Then `private = true` as a setting, in a `.priniarc` or your global config, makes prinia refuse every provider that is not marked, before anything is sent. Built-in `anthropic` and `openai` are not private unless you define `[providers.anthropic]` with `private = true`.
+
+```toml
+# ~/.config/prinia/config.toml
+[providers.local]
+type = "openai"
+base_url = "http://localhost:11434/v1"
+private = true
+
+[providers.corp]               # a company key covered by an NDA
+type = "anthropic"
+api_key_env = "CORP_ANTHROPIC_KEY"
+private = true
+```
+
+```toml
+# .priniarc in a confidential repository
+private = true                 # only local / `private` providers, whatever your shell exports
+```
+
+`prinia init` marks the local model private. Only a project file or your own config can switch it on, and it only ever restricts. The check covers every call, including `history ask` and agent mode.
+
 A `.priniarc` is how a project gets its own behaviour: a repository that should never be recorded says `record = false`, one that must never run commands says `run = false`.
 
 ## Providers

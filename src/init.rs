@@ -112,7 +112,7 @@ pub fn run() -> Result<()> {
         pull(d, 20)?;
     }
     let mut cfg = format!(
-        "provider = \"local\"\nmax_input = 48000   # longer input is processed in parts\n\n[providers.local]\ntype = \"openai\"\nbase_url = \"{OLLAMA}/v1\"\nmodel = \"{model}\"\nfast_model = \"{model}\"\n"
+        "provider = \"local\"\nmax_input = 48000   # longer input is processed in parts\n\n[providers.local]\ntype = \"openai\"\nprivate = true\nbase_url = \"{OLLAMA}/v1\"\nmodel = \"{model}\"\nfast_model = \"{model}\"\n"
     );
     if let Some(d) = deep {
         cfg.push_str(&format!("deep_model = \"{d}\"\n"));

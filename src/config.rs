@@ -37,6 +37,7 @@ pub const KEYS: &[(&str, Ty)] = &[
     ("write", Ty::Bool),
     ("run", Ty::Bool),
     ("max_input", Ty::Num),
+    ("private", Ty::Bool),
     ("agent_steps", Ty::Num),
     ("check_retries", Ty::Num),
     ("keychain", Ty::Bool),
@@ -64,6 +65,7 @@ const PROJECT: &[&str] = &[
     "deep_over",
     "check_retries",
     "max_input",
+    "private",
     "agent",
     "agent_steps",
     "run",
@@ -316,6 +318,10 @@ impl Config {
             .get(field)?
             .as_str()
             .map(str::to_owned)
+    }
+
+    pub fn provider_bool(&self, name: &str, field: &str) -> Option<bool> {
+        self.providers.get(name)?.get(field)?.as_bool()
     }
 
     pub fn provider_names(&self) -> Vec<&String> {

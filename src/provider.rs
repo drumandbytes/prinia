@@ -149,6 +149,13 @@ impl Provider {
         if api_key.is_none() && official {
             bail!("provider `{name}` needs an API key in ${key_env}");
         }
+        // `private = true` (a directory, or your global config) allows only providers you marked
+        // `private = true`: a local model, or a hosted one covered by your own agreement.
+        if cfg.bool("private") == Some(true) && cfg.provider_bool(&name, "private") != Some(true) {
+            bail!(
+                "private mode is on, but provider `{name}` is not marked private; use one with `private = true` under [providers.<name>] in your global config (-p NAME), or turn `private` off"
+            );
+        }
         Ok(Provider {
             name,
             kind,

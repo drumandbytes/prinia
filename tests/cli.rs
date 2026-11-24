@@ -327,6 +327,31 @@ fn each_runs_one_call_per_line_and_reports_failures() {
 }
 
 #[test]
+fn private_mode_allows_only_providers_marked_private() {
+    let mock = Mock::start("ok", 200);
+    let env = Env::new("private", &mock);
+    let cfg = env.dir.join("cfg/config.toml");
+    let mut text = std::fs::read_to_string(&cfg).unwrap();
+    text.push_str(&format!(
+        "\n[providers.corp]\ntype = \"openai\"\nbase_url = \"http://127.0.0.1:{}/v1\"\nmodel = \"m\"\nprivate = true\n",
+        mock.port
+    ));
+    std::fs::write(&cfg, text).unwrap();
+    // a project file switches it on; the user's own env cannot undo it
+    std::fs::write(env.dir.join("work/.priniarc"), "private = true\n").unwrap();
+    for p in ["local", "anthropic"] {
+        let (_, err, code) = env.run(&["-p", p, "q"], "", &[("PRINIA_PRIVATE", "0")]);
+        assert!(
+            code != 0 && err.contains("not marked private"),
+            "{p}: {err}"
+        );
+    }
+    assert_eq!(mock.hits(), 0, "nothing was sent");
+    let (out, err, code) = env.run(&["-p", "corp", "q"], "", &[]);
+    assert_eq!((out.as_str(), code), ("ok\n", 0), "{err}");
+}
+
+#[test]
 fn piped_output_loses_its_code_fence() {
     let mock = Mock::start("```json\n{\"a\":1}\n```", 200);
     let env = Env::new("fence", &mock);
