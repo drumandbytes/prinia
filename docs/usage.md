@@ -59,6 +59,19 @@ The context comes from your own history, not from a provider's session, so it wo
 
 A call with context is cached separately from the same question without it.
 
+## Templates
+
+Save an instruction you reuse as a file, then call it by name:
+
+```bash
+mkdir -p .prinia/templates
+echo "Write a one-line conventional commit message for this diff." > .prinia/templates/commit
+git diff | prinia -t commit | pbcopy
+git diff | prinia -t commit "mention the ticket ABC-12"   # extra words are added after the template
+```
+
+`prinia -t NAME` looks for `.prinia/templates/NAME` in the current directory and its parents (so a repository can ship its own), then `templates/NAME` next to your global config. A template is plain text; it is the instruction, nothing more, so it cannot change settings.
+
 ## From the shell prompt (zsh)
 
 ```bash

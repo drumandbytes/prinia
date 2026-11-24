@@ -92,6 +92,29 @@ enum Layer {
     Global,
 }
 
+/// A saved instruction: the nearest `.prinia/templates/NAME` above `cwd`, else the config directory's.
+pub fn template(name: &str, cwd: &Path) -> anyhow::Result<String> {
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+        anyhow::bail!("bad template name {name:?}");
+    }
+    let mut dirs: Vec<PathBuf> = cwd
+        .ancestors()
+        .map(|d| d.join(".prinia/templates"))
+        .collect();
+    dirs.extend(global_path().and_then(|p| Some(p.parent()?.join("templates"))));
+    for d in &dirs {
+        if let Ok(t) = fs::read_to_string(d.join(name)) {
+            return Ok(t.trim().to_string());
+        }
+    }
+    anyhow::bail!(
+        "no template `{name}`; put the instruction in .prinia/templates/{name} or {}",
+        dirs.last()
+            .map(|d| d.join(name).display().to_string())
+            .unwrap_or_default()
+    )
+}
+
 pub struct Config {
     /// `.priniarc` files, nearest last.
     project: Table,
@@ -324,6 +347,19 @@ mod tests {
             std::env::remove_var("PRINIA_FAST_UNDER");
             std::env::remove_var("PRINIA_CACHE_TTL");
         }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn templates_come_from_the_nearest_directory_and_reject_paths() {
+        let root = std::env::temp_dir().join(format!("prinia-tpl-{}", std::process::id()));
+        let sub = root.join("a");
+        fs::create_dir_all(root.join(".prinia/templates")).unwrap();
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(root.join(".prinia/templates/t"), "do it\n").unwrap();
+        assert_eq!(template("t", &sub).unwrap(), "do it");
+        assert!(template("../t", &sub).is_err());
+        assert!(template("missing-template-xyz", &sub).is_err());
         fs::remove_dir_all(&root).unwrap();
     }
 }

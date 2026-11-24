@@ -78,6 +78,10 @@ struct Cli {
     #[arg(short = 'y', long)]
     yes: bool,
 
+    /// Use a saved instruction: `.prinia/templates/NAME` here or above, or `templates/NAME` in the config directory
+    #[arg(short = 't', long, value_name = "NAME")]
+    template: Option<String>,
+
     /// Answer with one shell command and nothing else (what the shell widget uses)
     #[arg(long, conflicts_with_all = ["agent", "do_it", "json", "check"])]
     cmd: bool,
@@ -284,7 +288,15 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
     if !stdin_tty {
         std::io::stdin().read_to_string(&mut payload)?;
     }
-    let instruction = cli.prompt.clone().unwrap_or_default();
+    let mut instruction = cli.prompt.clone().unwrap_or_default();
+    if let Some(name) = &cli.template {
+        let t = config::template(name, &std::env::current_dir()?)?;
+        instruction = if instruction.is_empty() {
+            t
+        } else {
+            format!("{t}\n\n{instruction}")
+        };
+    }
     if instruction.is_empty() && payload.trim().is_empty() {
         bail!("nothing to do. Usage: prinia \"question\"   or   cmd | prinia \"instruction\"");
     }

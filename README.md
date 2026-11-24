@@ -56,6 +56,7 @@ cmd | prinia "instruction" | cmd2    # a pipeline step
 prinia -f "..."                      # fast tier
 prinia -d "..."                      # reasoning tier
 prinia -p local "..."                # a configured provider
+prinia -t NAME "..."                 # a saved instruction (docs/usage.md#templates)
 prinia --cmd "..."                   # one shell command; `eval "$(prinia shell zsh)"` binds it to ctrl-g
 prinia -x "..."                     # let the model run commands to answer (agent + --run)
 prinia -a "..."                     # agent: the model reads and searches files here (--write, --run to allow more)
