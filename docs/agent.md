@@ -16,7 +16,7 @@ agent = true   # use agent mode for every call at a terminal
 run = true     # and let it run commands (`write = true` for file edits)
 ```
 
-The model then decides per question whether to call a tool. The `agent` setting only applies when both stdin and stdout are terminals, so pipelines stay plain filters; `-a` forces it anywhere, `--no-agent` turns it off for one call. `--json` and `--check` never use it. `run` and `write` are the same permissions as the flags: no confirmation, so enable them only where you are comfortable with that.
+The model then decides per question whether to call a tool. The `agent` setting only applies when both stdin and stdout are terminals, so pipelines stay plain filters; `-a` forces it anywhere, `--no-agent` turns it off for one call. `--json` and `--check` never use it. `run` and `write` are the same permissions as the flags: commands still ask first unless they are read-only, but file writes do not, so enable `write` only where changes can be reviewed.
 
 ## What it can do
 

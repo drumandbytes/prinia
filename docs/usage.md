@@ -145,9 +145,18 @@ Every successful call is saved to the [history](history.md) after its output has
 | `--check COMMAND` | Require the command to accept the answer on stdin; retry if not |
 | `--no-cache` | Skip the history cache |
 | `--record` / `--no-record` | Save or don't save this call |
+| `-t`, `--template NAME` | Use a saved instruction ([Templates](#templates)) |
+| `--each`, `-j N` | One call per stdin line, N at a time ([One call per line](#one-call-per-line)) |
+| `--cmd` | Answer with one shell command (what the zsh widget uses) |
+| `-a`, `--agent` / `-x`, `--do` | Agent mode / agent mode that may run commands ([Agent](agent.md)) |
+| `--write`, `--run`, `-y`, `--no-agent` | Agent permissions, skip the command question, turn the `agent` setting off once |
 
 | Command | |
 | :--- | :--- |
 | `prinia config` | Show every setting and where its value comes from |
+| `prinia init` | Find Ollama, pick a model for this machine, write the config |
+| `prinia trust` | Review and trust this project's `.priniarc` ([Configuration](configuration.md)) |
+| `prinia context [QUESTION]` | Show what `-c` would send; `--summarize` builds summaries now |
+| `prinia shell zsh` | The zsh widget, for `eval` in `~/.zshrc` |
 | `prinia history` | Browse, `show`, `rm` ([History](history.md)) |
 | `prinia key` | `show`, `import`, `rotate` ([History](history.md#the-key)) |

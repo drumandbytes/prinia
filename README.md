@@ -59,9 +59,10 @@ prinia -p local "..."                # a configured provider
 cat list.txt | prinia --each "..."      # one call per line, in parallel (-j N)
 prinia -t NAME "..."                 # a saved instruction (docs/usage.md#templates)
 prinia --cmd "..."                   # one shell command; `eval "$(prinia shell zsh)"` binds it to ctrl-g
-prinia -x "..."                     # let the model run commands to answer (agent + --run)
+prinia -x "..."                     # let the model run commands to answer (agent + --run); asks before anything not read-only, -y skips that
 prinia -a "..."                     # agent: the model reads and searches files here (--write, --run to allow more)
-prinia -c "..."                     # include earlier turns from this directory
+prinia -c "..."                     # include earlier turns from this directory (recent, relevant, older questions)
+prinia context ["question"]          # show what -c would send
 prinia --no-cache "..."              # ask again even if the call is in your history
 prinia --no-record "..."             # don't save this call
 

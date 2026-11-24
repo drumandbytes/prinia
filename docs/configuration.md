@@ -80,6 +80,8 @@ fast_model = "meta-llama/Llama-3.2-3B-Instruct-Turbo"
 | `base_url` | The API endpoint. Defaults to the official one for the type |
 | `api_key_env` | Environment variable holding the key. Defaults to `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`. Not needed for a local endpoint |
 | `model`, `fast_model`, `deep_model` | Models for the three tiers |
+| `tags` | Labels a project can ask for with the `tag` setting, e.g. `["private", "work"]` ([Tags and private mode](#tags-and-private-mode)) |
+| `private` | `true` is shorthand for the tag `private` |
 
 Without `-p` or `provider`, prinia uses the first of `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` that is set.
 
@@ -98,6 +100,10 @@ API keys are read from the environment and are never written to the history or t
 | `cache` | `pipe` | When identical calls are answered from history: `pipe`, `always`, `off` |
 | `context` | `0` | Earlier turns from this directory sent with every call; `-c` uses it, or 5 when unset |
 | `context_chars` | `16000` | Size cap for that context (characters; oldest turns are dropped first) |
+| `context_relevant` | `3` | Older turns matching the new question, sent in full (`0` = off; see [Context](usage.md#context)) |
+| `context_older` | `30` | Further older turns sent as one line each (`0` = off) |
+| `context_summary` | `false` | Add model-written summaries of older blocks of turns |
+| `context_blocks` | `4` | How many of those summaries |
 | `cache_ttl` | `7d` | How long a history entry can answer a call (`12h`, `3d`, `2w`, `1m`) |
 | `max_size` | `500m` | Size limit for the history's stored content (`100k`, `500m`, `2g`); the oldest turns go first |
 | `max_age` | none | Also drop turns older than this (`90d`, `52w`) |
@@ -106,6 +112,12 @@ API keys are read from the environment and are never written to the history or t
 | `history_scan` | `200` | Newest turns that `history agent` reads |
 | `ask_turns` | `15` | Best-matching turns `history ask` sends to the model |
 | `excerpt_prompt` / `excerpt_reply` | `200` / `400` (`history ask`: `400` / `1000`) | Characters of each prompt and answer sent for `history ask` and `history agent` |
+| `max_input` | `0` (off) | Longer stdin is processed in parts and combined ([Long input](usage.md#long-input)) |
+| `private` | `false` | Only use providers tagged `private` ([Tags and private mode](#tags-and-private-mode)) |
+| `tag` | none | Only use a provider with this tag |
+| `agent` | `false` | Agent mode for every call at a terminal ([Agent](agent.md)) |
+| `run` / `write` | `false` | Let agent mode run commands / change files |
+| `agent_steps` | `25` | Tool rounds before an agent session stops |
 | `check_retries` | `2` | Extra attempts when an answer fails `--json` or `--check` |
 | `keychain` | `false` | Keep the history key in the OS credential store instead of a file ([History](history.md#where-the-key-lives)) |
 | `prompt_pipe`, `prompt_interactive` | see below | The system prompts |
@@ -130,3 +142,5 @@ prinia sends one of these as the system prompt, depending on whether input or ou
 | :--- | :--- |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` (or the variable named by `api_key_env`) | Provider credentials |
 | `PRINIA_CONFIG` | Path of the global config file |
+| `PRINIA_WIDGET_KEY` | Keys for the zsh widget, space-separated (default `^g`); set before `eval "$(prinia shell zsh)"` |
+| `PRINIA_OLLAMA_URL` | Where `prinia init` looks for Ollama (default `http://localhost:11434`) |
