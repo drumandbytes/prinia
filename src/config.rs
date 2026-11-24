@@ -85,8 +85,17 @@ pub fn trust(cwd: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(done)
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Layer {
+    Project,
+    Env,
+    Global,
+}
+
 pub struct Config {
-    table: Table,
+    /// `.priniarc` files, nearest last.
+    project: Table,
+    global: Table,
     providers: Table,
     pub files: Vec<PathBuf>,
 }
@@ -136,7 +145,8 @@ impl Config {
         paths.extend(dirs);
 
         let mut cfg = Config {
-            table: Table::new(),
+            project: Table::new(),
+            global: Table::new(),
             providers: Table::new(),
             files: Vec::new(),
         };
@@ -154,7 +164,8 @@ impl Config {
                 }
             };
             for (k, v) in t {
-                if !trusted && RISKY.contains(&k.as_str()) {
+                // a repo may always tighten (`run = false`); loosening needs trust
+                if !trusted && RISKY.contains(&k.as_str()) && v != Value::Boolean(false) {
                     eprintln!(
                         "[prinia] {}: `{k}` ignored until you run `prinia trust` here",
                         p.display()
@@ -185,7 +196,11 @@ impl Config {
                         p.display()
                     ),
                     Some(_) => {
-                        cfg.table.insert(k, v);
+                        if global {
+                            cfg.global.insert(k, v);
+                        } else {
+                            cfg.project.insert(k, v);
+                        }
                     }
                 }
             }
@@ -194,33 +209,38 @@ impl Config {
         cfg
     }
 
+    /// Directory settings win over the environment, which wins over the global file, so a
+    /// project can say "never record" and have it hold. Flags are applied by the caller.
+    fn layered(&self, key: &str) -> Option<(Layer, Value)> {
+        if let Some(v) = self.project.get(key) {
+            return Some((Layer::Project, v.clone()));
+        }
+        if let Some(e) = env(key) {
+            return Some((Layer::Env, Value::String(e)));
+        }
+        self.global.get(key).map(|v| (Layer::Global, v.clone()))
+    }
+
     pub fn str(&self, key: &str) -> Option<String> {
-        env(key).or_else(|| {
-            self.table
-                .get(key)
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-        })
+        self.layered(key)?.1.as_str().map(str::to_owned)
     }
 
     pub fn bool(&self, key: &str) -> Option<bool> {
-        match env(key) {
-            Some(e) => match e.to_lowercase().as_str() {
+        match self.layered(key)? {
+            (Layer::Env, Value::String(e)) => match e.to_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => Some(true),
                 "0" | "false" | "no" | "off" => Some(false),
                 _ => None,
             },
-            None => self.table.get(key).and_then(|v| v.as_bool()),
+            (_, v) => v.as_bool(),
         }
     }
 
     pub fn num(&self, key: &str) -> Option<u64> {
-        env(key).and_then(|e| e.parse().ok()).or_else(|| {
-            self.table
-                .get(key)
-                .and_then(|v| v.as_integer())
-                .map(|n| n as u64)
-        })
+        match self.layered(key)? {
+            (Layer::Env, Value::String(e)) => e.parse().ok(),
+            (_, v) => v.as_integer().map(|n| n as u64),
+        }
     }
 
     /// A field of `[providers.<name>]`.
@@ -238,11 +258,10 @@ impl Config {
 
     /// Effective value and where it came from, for `prinia config`.
     pub fn describe(&self, key: &str) -> (String, &'static str) {
-        if let Some(e) = env(key) {
-            return (e, "env");
-        }
-        match self.table.get(key) {
-            Some(v) => (v.to_string(), "config"),
+        match self.layered(key) {
+            Some((Layer::Project, v)) => (v.to_string(), "directory"),
+            Some((Layer::Env, Value::String(e))) => (e, "env"),
+            Some((_, v)) => (v.to_string(), "global"),
             None => ("-".into(), "default"),
         }
     }
@@ -279,6 +298,32 @@ mod tests {
             Some("http://x/v1")
         );
         assert_eq!(c.provider_str("nope", "type"), None);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn directory_beats_env_beats_global() {
+        let root = std::env::temp_dir().join(format!("prinia-order-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let global = root.join("g.toml");
+        fs::write(&global, "max_tokens = 1\ncache_ttl = \"1d\"\n").unwrap();
+        fs::write(root.join(".priniarc"), "max_tokens = 2\n").unwrap();
+        // SAFETY: only this test touches these variables
+        unsafe {
+            std::env::set_var("PRINIA_MAX_TOKENS", "3");
+            std::env::set_var("PRINIA_CACHE_TTL", "2d");
+        }
+        let c = Config::load_from(Some(global), &root);
+        assert_eq!(c.num("max_tokens"), Some(2), "directory beats env");
+        assert_eq!(
+            c.str("cache_ttl").as_deref(),
+            Some("2d"),
+            "env beats global"
+        );
+        unsafe {
+            std::env::remove_var("PRINIA_MAX_TOKENS");
+            std::env::remove_var("PRINIA_CACHE_TTL");
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 }

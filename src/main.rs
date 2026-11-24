@@ -634,7 +634,7 @@ fn show_config(cfg: &Config) -> Result<()> {
             .map(|p| p.display().to_string())
             .unwrap_or_default()
     );
-    println!("# env: PRINIA_<KEY> overrides any file; flags override env");
+    println!("# order: flag > .priniarc (directory) > env PRINIA_<KEY> > global file > default");
     for (key, _) in config::KEYS {
         let (value, source) = cfg.describe(key);
         let value: String = value.chars().take(60).collect();

@@ -3,9 +3,11 @@
 Every setting can be given four ways. The first that applies wins:
 
 1. A **flag** (where one exists, such as `-m` or `--no-record`)
-2. An **environment variable**: `PRINIA_` plus the setting name in capitals, e.g. `PRINIA_MAX_TOKENS=2000`
-3. A **`.priniarc`** file in the current directory or a parent. Closer files win over farther ones
+2. A **`.priniarc`** file in the current directory or a parent. Closer files win over farther ones
+3. An **environment variable**: `PRINIA_` plus the setting name in capitals, e.g. `PRINIA_MAX_TOKENS=2000`
 4. The **global config**: `~/.config/prinia/config.toml` (`$XDG_CONFIG_HOME` is respected, on Windows `%APPDATA%\prinia`; `PRINIA_CONFIG` points at another file)
+
+A directory beats the environment on purpose: a project that says `record = false` or `run = false` keeps saying it, whatever your shell exports. Only a flag overrides it, for one call.
 
 ```toml
 # ~/.config/prinia/config.toml, or .priniarc in a project
@@ -14,7 +16,7 @@ record = true
 cache_ttl = "3d"
 ```
 
-`prinia config` prints every setting, its effective value and its source (`env`, `config` or `default`), the files that were read and the configured providers. Unknown keys and values of the wrong type are reported on stderr and ignored, so a typo never silently changes behaviour. Booleans in environment variables accept `1/0`, `true/false`, `yes/no`, `on/off`.
+`prinia config` prints every setting, its effective value and its source (`directory`, `env`, `global` or `default`), the files that were read and the configured providers. Unknown keys and values of the wrong type are reported on stderr and ignored, so a typo never silently changes behaviour. Booleans in environment variables accept `1/0`, `true/false`, `yes/no`, `on/off`.
 
 A repository's `.priniarc` cannot set `providers`, `run` or `write` (they could send your API key elsewhere or let the model run commands) until you read the file and run `prinia trust`. Trust is tied to the file's exact contents, so any later change, such as from a `git pull`, needs trusting again. Your own global config is always trusted.
 
