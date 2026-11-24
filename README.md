@@ -95,7 +95,7 @@ More in [Usage](docs/usage.md) and [History](docs/history.md).
 
 prinia is beta software.
 
-- macOS and Linux are tested. Windows is untested.
+- macOS and Linux are tested. Windows builds and passes the tests in CI, but has not been used by hand.
 - Agent mode has run against a mock server and one OpenAI-compatible provider; the Anthropic tool-call format has not run against the real API yet.
 
 ## License

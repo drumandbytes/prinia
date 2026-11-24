@@ -40,9 +40,9 @@ Building needs a Rust toolchain and a C compiler (SQLite and zstd are compiled f
 | :--- | :--- | :--- |
 | macOS, arm64 and x86-64 | yes | yes |
 | Linux, arm64 and x86-64 | yes (glibc 2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40) | yes |
-| Windows | no | no |
+| Windows | no | in CI only |
 
-On older Linux systems, build from source. Windows has code paths (Credential Manager for the optional [credential store](history.md#where-the-key-lives)) that have never been built or run.
+On older Linux systems, build from source. On Windows, build from source (`cargo install --path .`). It builds and passes the test suite in CI on every change, but nobody has used it by hand yet: the command approval prompt (`CONIN$` / `CONOUT$`) and the Credential Manager key store (`keychain = true`) have not run on a real Windows console.
 
 The command is `prinia`. If you want something shorter, alias it in your shell: `alias ai=prinia`.
 
