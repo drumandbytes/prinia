@@ -130,7 +130,7 @@ impl Config {
     }
 
     pub fn load_from(global: Option<PathBuf>, cwd: &Path) -> Config {
-        let mut paths: Vec<PathBuf> = global.into_iter().collect();
+        let mut paths: Vec<PathBuf> = global.iter().cloned().collect();
         let mut dirs: Vec<PathBuf> = cwd.ancestors().map(|d| d.join(".priniarc")).collect();
         dirs.reverse(); // farthest first, so the nearest file wins
         paths.extend(dirs);
@@ -144,7 +144,7 @@ impl Config {
             let Ok(text) = fs::read_to_string(&p) else {
                 continue;
             };
-            let global = Some(&p) == global_path().as_ref();
+            let global = Some(&p) == global.as_ref();
             let trusted = global || is_trusted(&text);
             let t = match toml::from_str::<Table>(&text) {
                 Ok(t) => t,
