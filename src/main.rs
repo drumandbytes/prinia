@@ -73,6 +73,10 @@ struct Cli {
     #[arg(long)]
     run: bool,
 
+    /// With --run / -x: run every command without asking (read-only ones never ask)
+    #[arg(short = 'y', long)]
+    yes: bool,
+
     /// Don't use agent mode, even if the `agent` setting is on
     #[arg(long, conflicts_with = "agent")]
     no_agent: bool,
@@ -426,6 +430,7 @@ fn ask(cli: &Cli, cfg: &Config, keychain: bool) -> Result<()> {
                     user: &user,
                     write: cli.write || cfg.bool("write").unwrap_or(false),
                     run: cli.run || cli.do_it || cfg.bool("run").unwrap_or(false),
+                    yes: cli.yes,
                 },
                 &mut show,
             )?

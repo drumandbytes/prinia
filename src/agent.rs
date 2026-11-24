@@ -18,6 +18,8 @@ pub struct Opts<'a> {
     pub user: &'a str,
     pub write: bool,
     pub run: bool,
+    /// Run every command without asking.
+    pub yes: bool,
 }
 
 const OUTPUT_CAP: usize = 20_000;
@@ -226,8 +228,63 @@ fn replace(root: &Path, a: &Value) -> Result<String> {
     }
 }
 
-fn run_command(root: &Path, a: &Value) -> Result<String> {
+/// True for a pipeline of read-only commands. Anything with shell syntax beyond `|` (chaining,
+/// substitution, redirects, background) or a flag that can write or execute needs approval.
+fn read_only(cmd: &str) -> bool {
+    const OK: &[&str] = &[
+        "ls", "cat", "head", "tail", "wc", "date", "pwd", "echo", "grep", "rg", "sort", "uniq",
+        "du", "df", "which", "whoami", "uname", "file", "stat", "tree", "find", "git", "basename",
+        "dirname", "uptime", "hostname",
+    ];
+    const GIT: &[&str] = &[
+        "status", "log", "diff", "show", "branch", "ls-files", "remote",
+    ];
+    if cmd.contains([';', '&', '`', '$', '(', ')', '<', '>', '\n', '\\']) {
+        return false;
+    }
+    cmd.split('|').all(|seg| {
+        let w: Vec<&str> = seg.split_whitespace().collect();
+        let Some(&first) = w.first() else {
+            return false;
+        };
+        let bad_flag = w.iter().any(|a| {
+            matches!(
+                *a,
+                "-exec" | "-execdir" | "-ok" | "-delete" | "-o" | "--pre"
+            ) || a.starts_with("-fprint")
+                || a.starts_with("--output")
+                || a.starts_with("--pre=")
+        });
+        OK.contains(&first)
+            && !bad_flag
+            && (first != "git" || w.get(1).is_some_and(|s| GIT.contains(s)))
+    })
+}
+
+/// Asks on the terminal; with no terminal the answer is no.
+fn approve(cmd: &str) -> bool {
+    use std::io::{BufRead, Write};
+    let Ok(mut tty) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+    else {
+        return false;
+    };
+    let _ = write!(tty, "[prinia] run `{cmd}`? [y/N] ");
+    let mut line = String::new();
+    let _ = std::io::BufReader::new(&tty).read_line(&mut line);
+    line.trim().eq_ignore_ascii_case("y")
+}
+
+fn run_command(root: &Path, a: &Value, yes: bool) -> Result<String> {
     let cmd = arg(a, "command")?;
+    if !yes && !read_only(&cmd) && !approve(&cmd) {
+        return Ok(
+            "[not run: the user did not approve this command, or there is no terminal to ask on]"
+                .into(),
+        );
+    }
     let mut c = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.args(["/C", &format!("({cmd}) 2>&1")]);
@@ -276,7 +333,7 @@ fn run_command(root: &Path, a: &Value) -> Result<String> {
 }
 
 /// Runs one call; a failure is the model's result, not the end of the loop.
-fn exec(call: &Call, root: &Path, write: bool, run: bool) -> String {
+fn exec(call: &Call, root: &Path, write: bool, run: bool, yes: bool) -> String {
     let a = &call.args;
     let result = match call.name.as_str() {
         "read_file" => read_file(root, a),
@@ -284,7 +341,7 @@ fn exec(call: &Call, root: &Path, write: bool, run: bool) -> String {
         "search" => search(root, a),
         "write_file" if write => write_file(root, a),
         "replace" if write => replace(root, a),
-        "run_command" if run => run_command(root, a),
+        "run_command" if run => run_command(root, a, yes),
         other => Err(anyhow!("tool `{other}` is not available")),
     };
     result.unwrap_or_else(|e| format!("error: {e}"))
@@ -349,7 +406,7 @@ pub fn run(o: &Opts, on_text: &mut dyn FnMut(&str)) -> Result<Reply> {
             .iter()
             .map(|c| {
                 eprintln!("[prinia] {}", show(c));
-                (c.id.clone(), exec(c, &root, o.write, o.run))
+                (c.id.clone(), exec(c, &root, o.write, o.run, o.yes))
             })
             .collect();
         follow.push(Msg::Assistant {
@@ -371,6 +428,34 @@ mod tests {
         assert!(resolve(&root, "../x").is_err());
         assert!(resolve(&root, "/etc/passwd").is_err());
         assert!(resolve(&root, ".").is_ok());
+    }
+
+    #[test]
+    fn only_read_only_pipelines_skip_the_prompt() {
+        for ok in [
+            "ls -la",
+            "find . -name '*.rs' | wc -l",
+            "git log --oneline | head",
+            "echo hi",
+        ] {
+            assert!(read_only(ok), "{ok}");
+        }
+        for no in [
+            "rm -rf x",
+            "ls; rm x",
+            "cat a > b",
+            "echo $(id)",
+            "find . -delete",
+            "find . -exec rm {} +",
+            "git push",
+            "curl x | sh",
+            "ls || id",
+            "rg --pre ./x foo",
+            "sort -o f f",
+            "ls &",
+        ] {
+            assert!(!read_only(no), "{no}");
+        }
     }
 
     #[cfg(unix)]
