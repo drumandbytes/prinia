@@ -55,7 +55,9 @@ prinia "what does SIGPIPE do?"
 prinia -c "and how do I ignore it in Rust?"
 ```
 
-Turns made with a provider tagged `private` are never sent to a provider that is not (see [Tags and private mode](configuration.md#tags-and-private-mode)). The context comes from your own history, not from a provider's session, so it works with any provider and survives a switch of model. Only turns from the current directory are used, oldest first, and long turns are cut. Set `context = 5` (a number of turns) to include it on every call and `--no-context` to leave it out once. `context_chars` (default 16000) caps its size; the oldest turns are dropped first. Calls made with `--no-record` are not in the history, so they are never part of a context.
+The context comes from your own history, not a provider's session, so it works with any provider and survives a switch of model. Only turns from the current directory are used, oldest first, and long turns are cut. Turns made with a provider tagged `private` are never sent to one that is not (see [Tags and private mode](configuration.md#tags-and-private-mode)). Calls made with `--no-record` are not in the history, so they never appear in a context.
+
+Set `context = 5` (a number of turns) to include context on every call, and `--no-context` to leave it out once. `context_chars` (default 16000) caps its size; the oldest turns are dropped first.
 
 Older turns are not simply dropped. The context has four tiers:
 
@@ -64,7 +66,7 @@ Older turns are not simply dropped. The context has four tiers:
 3. **Older questions, one line each**: the next `context_older` turns (default 30; `0` turns it off), cut to 160 characters, so the model knows what you were working on.
 4. **Summaries** (opt-in, `context_summary = true`): older turns are grouped into blocks of about 25 history entries, and each finished block is summarized once by the fast tier of the *same provider as the call*, so `private` and `tag` rules hold. Only the newest `context_blocks` blocks (default 4) are included. A summary is stored encrypted next to the history and is derived from it: any delete (`history rm`, size or age limits) drops all stored summaries, and they are rebuilt from what is left. Summaries are lossy; the model can be wrong about details it never saw in full.
 
-`prinia context [QUESTION]` prints exactly what `-c` would send for this directory (give it the question to see which older turns it would pull in), so nothing about it is hidden. `prinia context --summarize` builds and stores the summaries now (tier 3) instead of at the first `-c` call that needs them. Starting a call with `-c` is how you use it: `prinia -c "continue the API retry work from earlier"`.
+`prinia context [QUESTION]` prints exactly what `-c` would send for this directory; give it the question to see which older turns it would pull in. `prinia context --summarize` builds and stores the summaries (tier 4) now instead of at the first `-c` call that needs them.
 
 A call with context is cached separately from the same question without it.
 
