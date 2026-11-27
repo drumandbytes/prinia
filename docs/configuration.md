@@ -18,7 +18,7 @@ cache_ttl = "3d"
 
 `prinia config` prints every setting, its effective value and its source (`directory`, `env`, `global` or `default`), the files that were read and the configured providers. Unknown keys and values of the wrong type are reported on stderr and ignored, so a typo never silently changes behaviour. Booleans in environment variables accept `1/0`, `true/false`, `yes/no`, `on/off`.
 
-A `.priniarc` holds behaviour only: `record`, `cache`, `cache_ttl`, `context`, `context_chars`, `max_tokens`, `effort`, `fast_under`, `deep_over`, `check_retries`, `max_input`, `agent`, `agent_steps`, `run`, `write` and the two prompts. Everything about the device is read only from your global config and ignored, with a warning, in a project file: `[providers.*]`, `provider`, the model names, `keychain` and the history limits. A repository therefore cannot choose where your prompts go.
+A `.priniarc` holds behaviour only: `record`, `cache`, `cache_ttl`, the `context*` settings, `max_tokens`, the `*effort` settings, `fast_under`, `deep_over`, `check_retries`, `max_input`, `private`, `tag`, `agent`, `agent_steps`, `run`, `write` and the two prompts. Everything about the device is read only from your global config and ignored, with a warning, in a project file: `[providers.*]`, `provider`, the model names, `keychain` and the history limits (`max_size`, `max_age`). A repository therefore cannot choose where your prompts go.
 
 Settings that let the model act on your machine or change what it is told (`run`, `write`, `agent`, `prompt_pipe`, `prompt_interactive`) are ignored in a project file until you run `prinia trust`, which prints each file and asks before trusting it (`--yes` skips the question). Turning `run`, `write` or `agent` off needs no trust. Trust is tied to the file's exact contents, so any later change, such as from a `git pull`, needs trusting again. Your own global config is always trusted.
 
@@ -52,11 +52,9 @@ tag = "work"                   # use a provider tagged "work" (your default if i
 - Tags mean what you decide. prinia cannot check that a provider is covered by an agreement; marking it `private` is your statement that it is.
 - The check covers every call, including `history ask` and agent mode. `prinia init` tags the local model `private`.
 
-A `.priniarc` is how a project gets its own behaviour: a repository that should never be recorded says `record = false`, one that must never run commands says `run = false`.
-
 ## Providers
 
-Two wire formats are supported: Anthropic's Messages API (`type = "anthropic"`) and OpenAI-compatible chat completions (`type = "openai"`). Anthropic and OpenAI are built in and need only their API key in `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`. Anything else is a table in the config:
+Two wire formats are supported: Anthropic's Messages API (`type = "anthropic"`) and OpenAI-compatible chat completions (`type = "openai"`). Anthropic and OpenAI are built in and need only their API key in `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`; without `-p` or `provider`, the first of those that is set is used. Anything else is a table in the config:
 
 ```toml
 provider = "local"                       # the default provider
@@ -82,8 +80,6 @@ fast_model = "meta-llama/Llama-3.2-3B-Instruct-Turbo"
 | `model`, `fast_model`, `deep_model` | Models for the three tiers |
 | `tags` | Labels a project can ask for with the `tag` setting, e.g. `["private", "work"]` ([Tags and private mode](#tags-and-private-mode)) |
 | `private` | `true` is shorthand for the tag `private` |
-
-Without `-p` or `provider`, prinia uses the first of `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` that is set.
 
 API keys are read from the environment and are never written to the history or the config. Calls to the official Anthropic endpoint with a model that can decline a request ask the API to retry on a fallback model automatically.
 
