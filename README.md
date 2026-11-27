@@ -14,8 +14,8 @@ prinia -d "review this design for race conditions" < design.md
 
 - **A real Unix filter.** When input or output is piped you get raw text: no markdown, no code fences, errors on stderr, a non-zero exit code on failure.
 - **Any provider.** Anthropic and any OpenAI-compatible endpoint, which covers OpenAI, Ollama and other local runners, and most hosted services. No vendor CLI, no SDK.
-- **Fast.** Answers stream to your terminal as they arrive. Starting up takes milliseconds, and a call that is already in your history returns without touching the network.
-- **Fast, regular and deep tiers.** `-f` and `-d` pick a model for the job; each provider maps them to its own models.
+- **Fast.** Answers stream as they arrive, startup takes milliseconds, and a call already in your history returns without touching the network.
+- **Model tiers.** `-f` (fast) and `-d` (deep) pick a model for the job; each provider maps the tiers to its own models.
 - **History you own.** Prompts, input and responses are compressed and encrypted on disk. Browse it, delete from it, back the key up as 24 words.
 - **Configurable.** Every setting works as a flag, an environment variable, a project file or a global file.
 
@@ -42,11 +42,9 @@ No account or API key needed. With [Ollama](https://ollama.com) running:
 prinia init
 ```
 
-It checks how much memory you have, suggests a model that fits (for example `qwen2.5:14b` on 16 GB or more, plus `qwen2.5:32b` for `-d` on 40 GB or more), offers to `ollama pull` it, and writes `~/.config/prinia/config.toml` (it never overwrites an existing one). To do it by hand, see [Configuration](docs/configuration.md#providers).
+It checks your memory, suggests a model that fits (`qwen2.5:14b` on 16 GB or more, plus `qwen2.5:32b` for `-d` on 40 GB or more), offers to `ollama pull` it, and writes `~/.config/prinia/config.toml` without overwriting an existing one. To do it by hand, see [Configuration](docs/configuration.md#providers).
 
-Small models (3B and under) invent commands and ignore instructions. Other OpenAI-compatible runners (LM Studio, llama.cpp, vLLM) work with a different `base_url`.
-
-See [Install](docs/install.md) for other platforms and building from source, and [Configuration](docs/configuration.md) for local models and other providers.
+Small models (3B and under) invent commands and ignore instructions. Other OpenAI-compatible runners (LM Studio, llama.cpp, vLLM) work with a different `base_url`. [Install](docs/install.md) covers other platforms and building from source.
 
 ## Usage
 
