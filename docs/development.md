@@ -28,7 +28,13 @@ Debug builds read `PRINIA_DB` (the database path) so development and tests never
 | `src/curate.rs` | `history ask` and `history agent` (a model reads excerpts of the history) |
 | `src/agent.rs` | Agent mode: the tool loop and its tools |
 | `src/stats.rs` | `stats` output (reads the stats table, never the content) |
+| `src/retrieve.rs` | Finding the turns that match some words, for `history ask` and `-c` |
+| `src/check.rs` | Validation for `--json` and `--check` |
+| `src/init.rs` | `prinia init`: find a local model server, pick a model, write the config |
+| `src/update.rs` | `prinia update`: runs the release's installer into the binary's folder |
+| `src/sh.rs` | Runs a command through the platform shell |
 | `scripts/install.sh` | The installer, attached to every release |
+| `scripts/prinia.zsh` | The zsh widget behind `prinia shell zsh` |
 | `packaging/` | Template for the Homebrew formula |
 
 ## Notes for contributors
