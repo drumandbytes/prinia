@@ -25,9 +25,9 @@ prinia update --check     # is a newer release out?
 prinia update             # install it in place
 ```
 
-`prinia update` downloads the installer from the latest release and runs it into the folder the current binary lives in, so it does exactly what the install script does, including the checksum check; the installer is the only copy of that logic. Nothing is checked or downloaded unless you run the command.
+`prinia update` downloads the installer from the latest release and runs it into the folder the current binary lives in, so it does exactly what the install script does, including the checksum check. Nothing is checked or downloaded unless you run the command.
 
-It refuses for a binary installed by Homebrew or cargo (use `brew upgrade prinia` or `cargo install`) and for a development build. It is not available on Windows. Running the install script again always works as well, for any version.
+It refuses for a binary installed by Homebrew or cargo (use `brew upgrade prinia` or `cargo install`) and for a development build. It is not available on Windows. Running the install script again always works, for any version, and so does `brew upgrade prinia` for a Homebrew install.
 
 Note that the checksum comes from the same release as the binary: it catches a corrupt download, not a compromised release.
 
@@ -59,6 +59,6 @@ On older Linux systems, build from source. On Windows, build from source (`cargo
 
 The command is `prinia`. If you want something shorter, alias it in your shell: `alias ai=prinia`.
 
-## Upgrade and uninstall
+## Uninstall
 
-Run the install script again, or `brew upgrade prinia`. To uninstall, remove the binary. Your history and key are separate; see [History](history.md#where-things-are-stored) for where they live.
+Remove the binary. Your history and key are separate; see [History](history.md#where-things-are-stored) for where they live.
